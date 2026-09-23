@@ -1,0 +1,7 @@
+node_modules/
+.npm-cache/
+.env
+inbox/
+library/
+needs-review/
+data/
