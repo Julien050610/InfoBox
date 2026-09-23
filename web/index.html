@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>InfoBox · 本地知识工作台</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/styles.css?v=26">
+</head>
+<body>
+  <div class="paper-grain" aria-hidden="true"></div>
+  <button class="sidebar-toggle" id="sidebarToggle" aria-label="收起左侧栏" title="收起左侧栏">‹</button>
+  <main class="workspace" id="workspace">
+    <aside class="sidebar" aria-label="知识库导航">
+      <header class="brand">
+        <div class="brand-mark">IB</div>
+        <div>
+          <p class="eyebrow">PERSONAL ARCHIVE</p>
+          <h1>InfoBox</h1>
+        </div>
+      </header>
+
+      <section class="inbox-panel" id="inboxDropzone" aria-label="收件箱文件上传区">
+        <input id="inboxFileInput" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,.gif,.url,.webloc" multiple hidden>
+        <button class="inbox-drop-button" id="inboxChooseButton" type="button">
+          <span class="inbox-drop-icon">＋</span>
+          <span><strong>拖入收件箱</strong><small>或点击选择文件</small></span>
+        </button>
+        <button class="process-inbox-button" id="processInboxButton" type="button" disabled>
+          <span>▶</span><span id="processInboxLabel">执行收件箱分类</span>
+        </button>
+        <p class="inbox-status" id="inboxStatus">收件箱为空</p>
+      </section>
+
+      <nav class="quick-nav" aria-label="快捷入口">
+        <button class="nav-item" data-scope="inbox">
+          <span class="nav-icon">⇩</span><span>收件箱</span><span class="nav-count inbox-count" id="inboxCount">0</span>
+        </button>
+        <button class="nav-item is-active" data-scope="all">
+          <span class="nav-icon">⌂</span><span>全部资料</span><span class="nav-count" id="allCount">0</span>
+        </button>
+        <button class="nav-item" data-scope="recent">
+          <span class="nav-icon">◷</span><span>最近添加</span><span class="nav-count" id="recentCount">0</span>
+        </button>
+        <button class="nav-item" data-scope="review">
+          <span class="nav-icon">◇</span><span>待检查</span><span class="nav-count alert" id="reviewCount">0</span>
+        </button>
+        <button class="nav-item" data-scope="favorites">
+          <span class="nav-icon">★</span><span>收藏</span><span class="nav-count" id="favoriteCount">0</span>
+        </button>
+        <button class="nav-item" data-scope="unread">
+          <span class="nav-icon">○</span><span>未读</span><span class="nav-count" id="unreadCount">0</span>
+        </button>
+      </nav>
+
+      <section class="saved-views-section">
+        <div class="section-heading"><span>SAVED VIEWS</span><span class="tree-total" id="savedViewCount">0</span></div>
+        <div class="saved-view-list" id="savedViewList"><div class="saved-view-empty">尚未保存筛选视图</div></div>
+      </section>
+
+      <section class="tree-section">
+        <div class="section-heading">
+          <span>LIBRARY</span>
+          <span class="section-heading-actions"><button class="add-folder-button structure-button" id="structureButton" type="button" aria-expanded="false" title="整理目录" aria-label="整理目录">⌘</button><button class="add-folder-button" id="newFolderButton" type="button" aria-expanded="false" title="新建文件夹" aria-label="新建文件夹">＋</button><span class="tree-total" id="libraryCount">0</span></span>
+        </div>
+        <div class="folder-creator" id="folderCreator" hidden>
+          <select id="folderParent" aria-label="上级文件夹"><option value="">一级文件夹</option></select>
+          <input id="folderName" type="text" maxlength="80" placeholder="文件夹名称" aria-label="文件夹名称">
+          <div><button type="button" id="cancelFolderButton" data-folder-cancel>取消</button><button type="button" id="createFolderButton" data-folder-create>创建</button></div>
+        </div>
+        <div class="tree" id="libraryTree" role="tree"></div>
+      </section>
+
+      <footer class="sidebar-footer">
+        <span class="status-dot" id="statusDot"></span>
+        <span id="connectionStatus">正在连接本地知识库…</span>
+      </footer>
+    </aside>
+
+    <section class="content-column">
+      <header class="topbar">
+        <div class="topbar-leading">
+          <div class="history-controls" aria-label="页面导航">
+            <button id="backButton" type="button" aria-label="后退" title="后退" disabled>←</button>
+            <button id="forwardButton" type="button" aria-label="前进" title="前进" disabled>→</button>
+          </div>
+          <div class="collection-heading">
+            <p class="eyebrow" id="collectionPath">KNOWLEDGE LIBRARY</p>
+            <h2 id="collectionTitle">全部资料</h2>
+          </div>
+        </div>
+        <label class="search-box">
+          <span aria-hidden="true">⌕</span>
+          <input id="searchInput" type="search" placeholder="搜索标题、摘要、标签和全文" autocomplete="off">
+          <kbd>Ctrl K</kbd>
+        </label>
+        <button class="toolbar-button" id="filterButton" aria-expanded="false"><span>筛选</span><b id="filterCount" hidden>0</b></button>
+        <button class="toolbar-button" id="graphButton" aria-pressed="false"><span>◌</span> 知识图谱</button>
+        <button class="icon-button" id="refreshButton" title="刷新资料" aria-label="刷新资料">↻</button>
+      </header>
+
+      <section class="filter-panel" id="filterPanel" hidden aria-label="资料筛选">
+        <div class="filter-panel-head"><div><p class="eyebrow">FILTER LIBRARY</p><h3>组合筛选</h3></div><button class="filter-close" id="filterClose" aria-label="关闭筛选">×</button></div>
+        <div class="filter-grid">
+          <fieldset><legend>文件类型</legend><div class="choice-row" id="kindFilters"></div></fieldset>
+          <fieldset><legend>阅读状态</legend><div class="choice-row" id="readingFilters"></div></fieldset>
+          <fieldset><legend>标签 <select id="tagMode" aria-label="标签匹配方式"><option value="and">全部匹配</option><option value="or">任一匹配</option></select></legend><div class="tag-filter-list" id="tagFilters"></div></fieldset>
+          <fieldset><legend>其他条件</legend><div class="filter-fields"><label>资料状态<select id="statusFilter"><option value="">全部</option><option value="ready">已入库</option><option value="review">待检查</option></select></label><label>收藏<select id="favoriteFilter"><option value="any">全部</option><option value="yes">仅收藏</option><option value="no">未收藏</option></select></label><label>最低评分<select id="scoreFilter"><option value="0">不限</option><option value="1">1 星</option><option value="2">2 星</option><option value="3">3 星</option><option value="4">4 星</option><option value="5">5 星</option></select></label><label>排序<select id="sortFilter"><option value="received_desc">最近收件</option><option value="published_desc">最近发表</option><option value="score_desc">评分最高</option><option value="title_asc">标题顺序</option></select></label></div></fieldset>
+          <fieldset class="date-filter"><legend>日期范围</legend><div class="filter-fields"><label>发表自<input id="publishedFrom" type="date"></label><label>发表至<input id="publishedTo" type="date"></label><label>收件自<input id="receivedFrom" type="date"></label><label>收件至<input id="receivedTo" type="date"></label></div></fieldset>
+        </div>
+        <div class="filter-actions"><button class="secondary-action" id="clearFilters">清除筛选</button><button class="secondary-action" id="saveViewButton">保存当前视图</button><button class="primary-action" id="applyFilters">查看结果</button></div>
+      </section>
+
+      <section class="structure-panel" id="structurePanel" hidden aria-label="目录重构">
+        <div class="structure-panel-head">
+          <div><p class="eyebrow">LIBRARY ARCHITECTURE</p><h3>整理知识结构</h3><p>先查看 Agent 建议，再决定是否应用。每次调整都可以撤销。</p></div>
+          <button class="filter-close" id="structureClose" aria-label="关闭目录整理">×</button>
+        </div>
+        <div class="structure-grid">
+          <section class="structure-card agent-structure-card">
+            <span class="structure-index">01</span>
+            <div class="structure-card-title"><div><p class="eyebrow">AGENT PLAN</p><h4>生成重构方案</h4></div><span class="safe-badge">仅预览</span></div>
+            <p class="structure-help">选择整个知识库或某个文件夹。生成方案不会移动文件。</p>
+            <div class="structure-form-row"><label>重构范围<select id="restructureScope"><option value="">整个知识库</option></select></label><button class="primary-action" id="generateRestructure" type="button">生成对照</button></div>
+            <div class="restructure-preview" id="restructurePreview"><div class="structure-empty">尚未生成方案</div></div>
+          </section>
+          <section class="structure-card manual-structure-card">
+            <span class="structure-index">02</span>
+            <div class="structure-card-title"><div><p class="eyebrow">MANUAL CHANGE</p><h4>更名或移动文件夹</h4></div></div>
+            <p class="structure-help">文件资料与关联会保留，知识图谱会在完成后自动刷新。</p>
+            <div class="structure-fields">
+              <label>选择文件夹<select id="folderMoveSource"></select></label>
+              <label>新的上级<select id="folderMoveParent"><option value="">作为一级文件夹</option></select></label>
+              <label class="structure-name-field">新名称<input id="folderMoveName" maxlength="80" placeholder="输入文件夹名称"></label>
+            </div>
+            <button class="secondary-action structure-move-action" id="moveFolderButton" type="button">应用文件夹调整</button>
+          </section>
+        </div>
+        <section class="structure-history-section">
+          <div class="structure-history-head"><div><p class="eyebrow">CHANGE LOG</p><h4>最近的结构调整</h4></div><span id="structureHistoryCount">0 次</span></div>
+          <div class="structure-history" id="structureHistory"><div class="structure-empty">还没有结构调整记录</div></div>
+        </section>
+      </section>
+
+      <section class="catalog" aria-label="资料列表">
+        <div class="catalog-header">
+          <span id="resultCount">0 项资料</span>
+          <span class="catalog-hint">选择一项即可在下方阅读</span>
+        </div>
+        <div class="item-list" id="itemList"></div>
+      </section>
+
+      <section class="reader" aria-label="文件阅读器">
+        <header class="reader-toolbar">
+          <div class="reader-title">
+            <span class="kind-stamp" id="readerKind">—</span>
+            <div>
+              <p id="readerTitle">选择一项资料开始阅读</p>
+              <span id="readerSubtitle">PDF、Markdown、图片和视频链接都可以在这里查看</span>
+            </div>
+          </div>
+          <div class="reader-actions">
+            <button class="reading-toggle" id="readingToggle" aria-pressed="false"><span>▣</span> 阅读模式</button>
+            <div class="tabs" role="tablist" aria-label="阅读模式">
+              <button class="tab is-active" data-tab="asset" role="tab">原件</button>
+              <button class="tab" data-tab="markdown" role="tab">笔记</button>
+            </div>
+            <a class="open-button is-disabled" id="openOriginal" target="_blank" rel="noreferrer">新窗口打开 ↗</a>
+          </div>
+        </header>
+        <div class="viewer" id="viewer">
+          <div class="viewer-empty">
+            <div class="empty-glyph">文</div>
+            <p>从上方资料列表中选择一项</p>
+            <span>原件和知识笔记会显示在这里</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="graph-panel" id="graphPanel" hidden aria-label="知识图谱">
+        <header class="graph-head">
+          <div><p class="eyebrow">KNOWLEDGE MAP</p><h3>知识图谱</h3><p class="graph-help">单击聚焦 · 双击文件打开 · 拖动平移</p></div>
+          <div class="graph-head-tools">
+            <div class="graph-legend"><span><i class="legend-folder"></i>文件夹层级</span><span><i class="legend-relation"></i>资料关联</span><span><i class="legend-similar"></i>相似标签</span></div>
+            <div class="graph-controls" aria-label="图谱缩放">
+              <button type="button" data-graph-action="zoom-out" aria-label="缩小图谱">−</button>
+              <span id="graphZoom">100%</span>
+              <button type="button" data-graph-action="zoom-in" aria-label="放大图谱">＋</button>
+              <button type="button" data-graph-action="reset" aria-label="重置图谱视图">适应</button>
+            </div>
+          </div>
+        </header>
+        <div class="graph-canvas" id="graphCanvas"></div>
+      </section>
+    </section>
+
+    <aside class="inspector" aria-label="资料信息">
+      <div class="inspector-empty" id="inspectorEmpty">
+        <span class="inspector-index">00</span>
+        <p>资料信息</p>
+        <small>选择资料后查看摘要、标签与日期</small>
+      </div>
+      <div class="inspector-content" id="inspectorContent" hidden></div>
+      <section class="notes-panel" id="notesPanel" hidden>
+        <header class="notes-header">
+          <div><p class="eyebrow">ANCHORED NOTES</p><h3>阅读便签</h3></div>
+          <button class="new-note-button" id="newNoteButton">＋ 新建便签</button>
+        </header>
+        <div class="pin-hint" id="pinHint" hidden>点击正文中想要锚定的位置</div>
+        <div class="notes-scroll" id="notesScroll"><div class="notes-track" id="notesTrack"></div></div>
+      </section>
+    </aside>
+  </main>
+  <div class="anchor-markers" id="anchorMarkers" aria-hidden="true"></div>
+  <svg class="note-lines" id="noteLines" aria-hidden="true"></svg>
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script type="module" src="/app.js?v=27"></script>
+</body>
+</html>
