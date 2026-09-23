@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>InfoBox · 本地知识工作台</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=26">
+  <link rel="stylesheet" href="/styles.css?v=29">
 </head>
 <body>
   <div class="paper-grain" aria-hidden="true"></div>
@@ -62,12 +62,7 @@
       <section class="tree-section">
         <div class="section-heading">
           <span>LIBRARY</span>
-          <span class="section-heading-actions"><button class="add-folder-button structure-button" id="structureButton" type="button" aria-expanded="false" title="整理目录" aria-label="整理目录">⌘</button><button class="add-folder-button" id="newFolderButton" type="button" aria-expanded="false" title="新建文件夹" aria-label="新建文件夹">＋</button><span class="tree-total" id="libraryCount">0</span></span>
-        </div>
-        <div class="folder-creator" id="folderCreator" hidden>
-          <select id="folderParent" aria-label="上级文件夹"><option value="">一级文件夹</option></select>
-          <input id="folderName" type="text" maxlength="80" placeholder="文件夹名称" aria-label="文件夹名称">
-          <div><button type="button" id="cancelFolderButton" data-folder-cancel>取消</button><button type="button" id="createFolderButton" data-folder-create>创建</button></div>
+          <span class="section-heading-actions"><span class="tree-total" id="libraryCount">0</span></span>
         </div>
         <div class="tree" id="libraryTree" role="tree"></div>
       </section>
@@ -97,6 +92,11 @@
         </label>
         <button class="toolbar-button" id="filterButton" aria-expanded="false"><span>筛选</span><b id="filterCount" hidden>0</b></button>
         <button class="toolbar-button" id="graphButton" aria-pressed="false"><span>◌</span> 知识图谱</button>
+        <div class="structure-toolbar" aria-label="知识结构操作">
+          <button class="toolbar-button structure-run-button" id="structureButton" aria-pressed="false"><span>⌘</span> 重构</button>
+          <button class="toolbar-button structure-cancel-button" id="structureCancelButton" hidden>取消</button>
+          <button class="toolbar-button rollback-button" id="rollbackButton" aria-expanded="false"><span>↶</span> 回退</button>
+        </div>
         <button class="icon-button" id="refreshButton" title="刷新资料" aria-label="刷新资料">↻</button>
       </header>
 
@@ -112,35 +112,10 @@
         <div class="filter-actions"><button class="secondary-action" id="clearFilters">清除筛选</button><button class="secondary-action" id="saveViewButton">保存当前视图</button><button class="primary-action" id="applyFilters">查看结果</button></div>
       </section>
 
-      <section class="structure-panel" id="structurePanel" hidden aria-label="目录重构">
-        <div class="structure-panel-head">
-          <div><p class="eyebrow">LIBRARY ARCHITECTURE</p><h3>整理知识结构</h3><p>先查看 Agent 建议，再决定是否应用。每次调整都可以撤销。</p></div>
-          <button class="filter-close" id="structureClose" aria-label="关闭目录整理">×</button>
-        </div>
-        <div class="structure-grid">
-          <section class="structure-card agent-structure-card">
-            <span class="structure-index">01</span>
-            <div class="structure-card-title"><div><p class="eyebrow">AGENT PLAN</p><h4>生成重构方案</h4></div><span class="safe-badge">仅预览</span></div>
-            <p class="structure-help">选择整个知识库或某个文件夹。生成方案不会移动文件。</p>
-            <div class="structure-form-row"><label>重构范围<select id="restructureScope"><option value="">整个知识库</option></select></label><button class="primary-action" id="generateRestructure" type="button">生成对照</button></div>
-            <div class="restructure-preview" id="restructurePreview"><div class="structure-empty">尚未生成方案</div></div>
-          </section>
-          <section class="structure-card manual-structure-card">
-            <span class="structure-index">02</span>
-            <div class="structure-card-title"><div><p class="eyebrow">MANUAL CHANGE</p><h4>更名或移动文件夹</h4></div></div>
-            <p class="structure-help">文件资料与关联会保留，知识图谱会在完成后自动刷新。</p>
-            <div class="structure-fields">
-              <label>选择文件夹<select id="folderMoveSource"></select></label>
-              <label>新的上级<select id="folderMoveParent"><option value="">作为一级文件夹</option></select></label>
-              <label class="structure-name-field">新名称<input id="folderMoveName" maxlength="80" placeholder="输入文件夹名称"></label>
-            </div>
-            <button class="secondary-action structure-move-action" id="moveFolderButton" type="button">应用文件夹调整</button>
-          </section>
-        </div>
-        <section class="structure-history-section">
-          <div class="structure-history-head"><div><p class="eyebrow">CHANGE LOG</p><h4>最近的结构调整</h4></div><span id="structureHistoryCount">0 次</span></div>
-          <div class="structure-history" id="structureHistory"><div class="structure-empty">还没有结构调整记录</div></div>
-        </section>
+      <section class="rollback-panel" id="rollbackPanel" hidden aria-label="结构回退">
+        <div class="rollback-panel-head"><div><p class="eyebrow">LOCAL SNAPSHOTS</p><h3>结构回退</h3></div><button class="filter-close" id="rollbackClose" aria-label="关闭回退列表">×</button></div>
+        <p class="rollback-help">恢复当时已有资料的位置；之后新增的资料保持不变。</p>
+        <div class="rollback-history" id="structureHistory"></div>
       </section>
 
       <section class="catalog" aria-label="资料列表">
@@ -215,6 +190,8 @@
   <div class="anchor-markers" id="anchorMarkers" aria-hidden="true"></div>
   <svg class="note-lines" id="noteLines" aria-hidden="true"></svg>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="/app.js?v=27"></script>
+  <div class="move-popover" id="movePopover" hidden></div>
+  <script type="module" src="/app.js?v=30"></script>
 </body>
 </html>
+
