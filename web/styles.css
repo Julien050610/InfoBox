@@ -258,8 +258,11 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .tree-node .folder.is-collapsed { transform: rotate(-90deg); }
 .tree-node .node-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tree-node .node-count { color: rgba(255, 255, 255, .35); font-size: 10px; }
-.tree-library-selection { width: calc(100% - 8px); min-height: 31px; display: grid; grid-template-columns: 18px minmax(0,1fr); align-items: center; gap: 7px; margin: 0 4px 5px; padding: 0 8px; color: #e8c98f; background: rgba(212,177,123,.08); border: 1px dashed rgba(212,177,123,.28); border-radius: 5px; cursor: pointer; text-align: left; font-size: 9px; font-weight: 700; }
-.tree-library-selection:hover { color: #fff; background: rgba(212,177,123,.14); }
+.tree-root-node { min-height: 38px; color: #f3dfb7; background: rgba(212,177,123,.07); border: 1px solid rgba(212,177,123,.18); font-weight: 700; }
+.tree-root-node:hover { background: rgba(212,177,123,.12); }
+.tree-root-node.is-active { background: rgba(212,177,123,.17); box-shadow: inset 3px 0 0 #d4b17b; }
+.tree-root-node .folder { font-size: 13px; }
+.library-root-children { margin-left: 3px; }
 .restructure-checkbox { width: 16px; height: 16px; display: grid; place-items: center; color: transparent; background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.3); border-radius: 3px; font-size: 10px; }
 .restructure-checkbox.is-checked { color: var(--forest); background: #d4b17b; border-color: #d4b17b; }
 .restructure-checkbox.is-locked { opacity: .62; cursor: default; }

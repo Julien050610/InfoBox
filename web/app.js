@@ -262,7 +262,7 @@ function structureSelectionState(path) {
   return { checked: direct || locked, locked };
 }
 
-function treeHtml(nodes, depth = 0) {
+function treeHtml(nodes, depth = 1) {
   return nodes.map(node => {
     const collapsed = state.collapsedFolders.has(node.path);
     const hasChildren = Boolean(node.children?.length);
@@ -280,6 +280,21 @@ function treeHtml(nodes, depth = 0) {
   }).join('');
 }
 
+function libraryRootHtml() {
+  const collapsed = state.collapsedFolders.has('');
+  const selection = structureSelectionState('');
+  const children = state.tree?.children || [];
+  return `
+    <div class="tree-branch library-root" role="treeitem" aria-level="1">
+      <button class="tree-node tree-root-node ${state.scope === 'all' ? 'is-active' : ''}" data-scope="all" style="--depth:0">
+        <span class="folder ${collapsed ? 'is-collapsed' : ''}" data-tree-toggle="">▾</span>
+        <span class="node-name">Library</span><span class="node-count">${state.tree?.count || 0}</span>
+        ${state.restructureSelecting ? `<span class="restructure-checkbox ${selection.checked ? 'is-checked' : ''}" role="checkbox" aria-checked="${selection.checked}" data-restructure-folder="">${selection.checked ? '✓' : ''}</span>` : ''}
+      </button>
+      ${!collapsed ? `<div class="tree-children library-root-children" role="group">${children.length ? treeHtml(children) : '<div class="tree-empty-note">暂无分类</div>'}${folderCreatorHtml('', 1)}</div>` : ''}
+    </div>`;
+}
+
 function renderNavigation() {
   const readyCount = state.items.filter(item => item.status === 'ready').length;
   const inboxCount = state.inboxFiles.length;
@@ -291,9 +306,7 @@ function renderNavigation() {
   elements.favoriteCount.textContent = state.items.filter(item => item.favorite).length;
   elements.unreadCount.textContent = state.items.filter(item => item.reading_status === 'unread').length;
   elements.libraryCount.textContent = readyCount;
-  const librarySelection = structureSelectionState('');
-  const libraryCheckbox = state.restructureSelecting ? `<button class="tree-library-selection" type="button" data-restructure-folder="" aria-pressed="${librarySelection.checked}"><span class="restructure-checkbox ${librarySelection.checked ? 'is-checked' : ''}" role="checkbox" aria-checked="${librarySelection.checked}">${librarySelection.checked ? '✓' : ''}</span><span>整个 Library</span></button>` : '';
-  elements.tree.innerHTML = `${libraryCheckbox}${state.tree?.children?.length ? treeHtml(state.tree.children) : '<div class="tree-empty-note">暂无分类</div>'}${folderCreatorHtml('', 0)}`;
+  elements.tree.innerHTML = libraryRootHtml();
   const selectedCount = state.selectedStructureFolders.size;
   elements.structureButton.setAttribute('aria-pressed', String(state.restructureSelecting));
   elements.structureButton.innerHTML = state.structureBusy ? '<span>◌</span> 正在重构…' : state.restructureSelecting ? `<span>✓</span> 执行重构${selectedCount ? ` (${selectedCount})` : ''}` : '<span>⌘</span> 重构';
@@ -523,7 +536,7 @@ function renderList() {
   const items = browsingDirectory
     ? state.items.filter(item => item.status === 'ready' && item.category === currentPath)
     : filteredItems();
-  const title = state.scope === 'review' ? '待检查' : state.scope === 'recent' ? '最近添加' : state.scope === 'favorites' ? '收藏' : state.scope === 'unread' ? '未读' : state.scope === 'category' ? state.category.split('/').at(-1) : '全部资料';
+  const title = state.scope === 'review' ? '待检查' : state.scope === 'recent' ? '最近添加' : state.scope === 'favorites' ? '收藏' : state.scope === 'unread' ? '未读' : state.scope === 'category' ? state.category.split('/').at(-1) : 'Library';
   elements.collectionTitle.textContent = state.graphMode ? '知识图谱' : title;
   elements.collectionPath.textContent = state.graphMode ? 'KNOWLEDGE HOME' : currentPath ? `LIBRARY / ${currentPath.toUpperCase()}` : 'KNOWLEDGE LIBRARY';
   elements.resultCount.textContent = browsingDirectory ? `${folders.length} 个文件夹 · ${items.length} 个文件` : `${items.length} 项资料`;

@@ -338,6 +338,8 @@ test('creates two-level folders and moves a ready item between them', async () =
     assert.equal((await child.json()).path, 'Computer Science/强化学习');
 
     const beforeMove = await (await fetch(`${base}/api/library/tree`)).json();
+    assert.equal(beforeMove.name, 'Library');
+    assert.equal(beforeMove.path, '');
     assert.equal(beforeMove.children.find(node => node.path === 'Computer Science').count, 0);
 
     const move = await fetch(`${base}/api/items/${id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ category: 'Computer Science/强化学习' }) });
