@@ -21,8 +21,11 @@ const state = {
   savedViews: [],
   relations: [],
   restructureHistory: [],
-  restructurePreview: null,
+  restructureSelecting: false,
+  selectedStructureFolders: new Set(),
   structureBusy: false,
+  creatingFolderParent: null,
+  moveEntity: null,
   graphMode: true,
   graphFocusId: 'root',
   graphViewport: { x: 0, y: 0, scale: 1 },
@@ -67,11 +70,10 @@ const elements = {
   savedViewCount: document.querySelector('#savedViewCount'),
   savedViewList: document.querySelector('#savedViewList'),
   libraryCount: document.querySelector('#libraryCount'),
-  newFolderButton: document.querySelector('#newFolderButton'),
   structureButton: document.querySelector('#structureButton'),
-  folderCreator: document.querySelector('#folderCreator'),
-  folderParent: document.querySelector('#folderParent'),
-  folderName: document.querySelector('#folderName'),
+  structureCancelButton: document.querySelector('#structureCancelButton'),
+  rollbackButton: document.querySelector('#rollbackButton'),
+  rollbackPanel: document.querySelector('#rollbackPanel'),
   tree: document.querySelector('#libraryTree'),
   collectionPath: document.querySelector('#collectionPath'),
   collectionTitle: document.querySelector('#collectionTitle'),
@@ -82,14 +84,8 @@ const elements = {
   filterButton: document.querySelector('#filterButton'),
   filterCount: document.querySelector('#filterCount'),
   filterPanel: document.querySelector('#filterPanel'),
-  structurePanel: document.querySelector('#structurePanel'),
-  restructureScope: document.querySelector('#restructureScope'),
-  restructurePreview: document.querySelector('#restructurePreview'),
   structureHistory: document.querySelector('#structureHistory'),
-  structureHistoryCount: document.querySelector('#structureHistoryCount'),
-  folderMoveSource: document.querySelector('#folderMoveSource'),
-  folderMoveParent: document.querySelector('#folderMoveParent'),
-  folderMoveName: document.querySelector('#folderMoveName'),
+  movePopover: document.querySelector('#movePopover'),
   graphButton: document.querySelector('#graphButton'),
   graphPanel: document.querySelector('#graphPanel'),
   graphCanvas: document.querySelector('#graphCanvas'),
@@ -255,28 +251,33 @@ function activeFilterCount() {
   return f.kinds.length + f.tags.length + f.readingStatuses.length + Number(Boolean(f.status)) + Number(f.favorite !== 'any') + Number(f.scoreMin > 0) + Number(Boolean(f.publishedFrom)) + Number(Boolean(f.publishedTo)) + Number(Boolean(f.receivedFrom)) + Number(Boolean(f.receivedTo)) + Number(f.sort !== 'received_desc');
 }
 
+function folderCreatorHtml(parent, depth) {
+  if (state.creatingFolderParent !== parent) return `<button class="tree-create-row" type="button" data-new-folder-parent="${escapeHtml(parent)}" style="--depth:${depth}"><span>＋</span><span>${parent ? '新建子文件夹' : '在 Library 中新建文件夹'}</span></button>`;
+  return `<div class="tree-inline-creator" style="--depth:${depth}"><input data-folder-name maxlength="80" placeholder="文件夹名称" aria-label="文件夹名称"><button type="button" data-folder-create data-parent="${escapeHtml(parent)}">创建</button><button type="button" data-folder-cancel>×</button></div>`;
+}
+
+function structureSelectionState(path) {
+  const direct = state.selectedStructureFolders.has(path);
+  const locked = [...state.selectedStructureFolders].some(value => value !== path && (!value || path.startsWith(`${value}/`)));
+  return { checked: direct || locked, locked };
+}
+
 function treeHtml(nodes, depth = 0) {
   return nodes.map(node => {
     const collapsed = state.collapsedFolders.has(node.path);
     const hasChildren = Boolean(node.children?.length);
+    const selection = structureSelectionState(node.path);
     return `
     <div class="tree-branch" role="treeitem">
       <button class="tree-node ${state.scope === 'category' && state.category === node.path ? 'is-active' : ''}"
         data-category="${escapeHtml(node.path)}" style="--depth:${depth}">
         <span class="folder ${hasChildren ? '' : 'is-leaf'} ${collapsed ? 'is-collapsed' : ''}" ${hasChildren ? `data-tree-toggle="${escapeHtml(node.path)}"` : ''}>${hasChildren ? '▾' : '▱'}</span>
         <span class="node-name">${escapeHtml(node.name)}</span><span class="node-count">${node.count}</span>
+        ${state.restructureSelecting ? `<span class="restructure-checkbox ${selection.checked ? 'is-checked' : ''} ${selection.locked ? 'is-locked' : ''}" role="checkbox" aria-checked="${selection.checked}" data-restructure-folder="${escapeHtml(node.path)}">${selection.checked ? '✓' : ''}</span>` : ''}
       </button>
-      ${hasChildren && !collapsed ? `<div class="tree-children" role="group">${treeHtml(node.children, depth + 1)}</div>` : ''}
+      ${!collapsed ? `<div class="tree-children ${hasChildren ? '' : 'is-empty'}" role="group">${treeHtml(node.children || [], depth + 1)}${folderCreatorHtml(node.path, depth + 1)}</div>` : ''}
     </div>`;
   }).join('');
-}
-
-function flatFolders(nodes = [], result = []) {
-  nodes.forEach(node => {
-    result.push(node);
-    flatFolders(node.children || [], result);
-  });
-  return result;
 }
 
 function renderNavigation() {
@@ -290,10 +291,15 @@ function renderNavigation() {
   elements.favoriteCount.textContent = state.items.filter(item => item.favorite).length;
   elements.unreadCount.textContent = state.items.filter(item => item.reading_status === 'unread').length;
   elements.libraryCount.textContent = readyCount;
-  elements.tree.innerHTML = state.tree?.children?.length ? treeHtml(state.tree.children) : '<div class="empty-list">暂无分类</div>';
-  const selectedParent = elements.folderParent.value;
-  elements.folderParent.innerHTML = '<option value="">一级文件夹</option>' + (state.tree?.children || []).map(node => `<option value="${escapeHtml(node.path)}">${escapeHtml(node.name)} 下的二级文件夹</option>`).join('');
-  if ([...elements.folderParent.options].some(option => option.value === selectedParent)) elements.folderParent.value = selectedParent;
+  const librarySelection = structureSelectionState('');
+  const libraryCheckbox = state.restructureSelecting ? `<button class="tree-library-selection" type="button" data-restructure-folder="" aria-pressed="${librarySelection.checked}"><span class="restructure-checkbox ${librarySelection.checked ? 'is-checked' : ''}" role="checkbox" aria-checked="${librarySelection.checked}">${librarySelection.checked ? '✓' : ''}</span><span>整个 Library</span></button>` : '';
+  elements.tree.innerHTML = `${libraryCheckbox}${state.tree?.children?.length ? treeHtml(state.tree.children) : '<div class="tree-empty-note">暂无分类</div>'}${folderCreatorHtml('', 0)}`;
+  const selectedCount = state.selectedStructureFolders.size;
+  elements.structureButton.setAttribute('aria-pressed', String(state.restructureSelecting));
+  elements.structureButton.innerHTML = state.structureBusy ? '<span>◌</span> 正在重构…' : state.restructureSelecting ? `<span>✓</span> 执行重构${selectedCount ? ` (${selectedCount})` : ''}` : '<span>⌘</span> 重构';
+  elements.structureButton.disabled = state.structureBusy;
+  elements.structureCancelButton.hidden = !state.restructureSelecting;
+  elements.rollbackButton.disabled = state.structureBusy || state.restructureSelecting;
   elements.inboxChooseButton.disabled = state.inboxAvailable === false || state.uploadingInbox;
   elements.inboxDropzone.classList.toggle('is-unavailable', state.inboxAvailable === false);
   elements.processInboxButton.disabled = !supportedInboxCount || state.inboxAvailable === false || state.processingInbox || state.uploadingInbox;
@@ -348,99 +354,50 @@ function toggleFilterPanel(show = elements.filterPanel.hidden) {
   elements.filterPanel.hidden = !show;
   elements.filterButton.setAttribute('aria-expanded', String(show));
   if (show) {
-    toggleStructurePanel(false);
+    toggleRollbackPanel(false);
     renderFilterPanel();
   }
 }
 
-function renderStructurePanel() {
-  const folders = flatFolders(state.tree?.children || []);
-  const topFolders = (state.tree?.children || []);
-  const scopeValue = elements.restructureScope.value;
-  const sourceValue = elements.folderMoveSource.value;
-  const parentValue = elements.folderMoveParent.value;
-  elements.restructureScope.innerHTML = '<option value="">整个知识库</option>' + folders.map(folder => `<option value="${escapeHtml(folder.path)}">${escapeHtml(folder.path)}</option>`).join('');
-  elements.folderMoveSource.innerHTML = folders.length ? folders.map(folder => `<option value="${escapeHtml(folder.path)}">${escapeHtml(folder.path)}</option>`).join('') : '<option value="">暂无文件夹</option>';
-  elements.folderMoveParent.innerHTML = '<option value="">作为一级文件夹</option>' + topFolders.map(folder => `<option value="${escapeHtml(folder.path)}">移到 ${escapeHtml(folder.name)} 下</option>`).join('');
-  if ([...elements.restructureScope.options].some(option => option.value === scopeValue)) elements.restructureScope.value = scopeValue;
-  if ([...elements.folderMoveSource.options].some(option => option.value === sourceValue)) elements.folderMoveSource.value = sourceValue;
-  if ([...elements.folderMoveParent.options].some(option => option.value === parentValue)) elements.folderMoveParent.value = parentValue;
-  if (!elements.folderMoveName.value && elements.folderMoveSource.value) elements.folderMoveName.value = elements.folderMoveSource.value.split('/').at(-1);
-
-  const preview = state.restructurePreview;
-  elements.restructurePreview.innerHTML = !preview ? '<div class="structure-empty">尚未生成方案</div>' : `
-    <div class="preview-summary"><strong>${preview.changes.length ? `${preview.changes.length} 项建议调整` : '当前结构无需调整'}</strong><p>${escapeHtml(preview.rationale || 'Agent 没有补充说明。')}</p></div>
-    ${preview.changes.length ? `<div class="preview-changes">${preview.changes.map((change, index) => `
-      <label class="preview-change"><input type="checkbox" data-restructure-change="${index}" checked><span class="preview-change-copy"><strong>${escapeHtml(change.title)}</strong><span><i>${escapeHtml(change.from)}</i><b>→</b><i>${escapeHtml(change.to)}</i></span><small>${escapeHtml(change.reason || '目录层级更适合这项资料')} · ${Math.round(change.confidence * 100)}%</small></span></label>`).join('')}</div>
-      <div class="preview-actions"><span>取消勾选可保留原位置</span><button class="primary-action" type="button" data-apply-restructure>应用选中调整</button></div>` : ''}`;
-
-  elements.structureHistoryCount.textContent = `${state.restructureHistory.length} 次`;
-  elements.structureHistory.innerHTML = state.restructureHistory.length ? state.restructureHistory.slice(0, 12).map(record => {
+function renderRollbackHistory() {
+  const records = state.restructureHistory.slice(0, 30);
+  elements.structureHistory.innerHTML = records.length ? records.map(record => {
     const folderChange = record.folder_change;
-    const title = folderChange ? `${folderChange.source} → ${folderChange.target}` : `${record.changes.length} 项资料重分类`;
+    const title = folderChange ? `${folderChange.source} → ${folderChange.target}` : `${record.changes?.length || 0} 项资料重构`;
     const date = new Date(record.created_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-    return `<article class="structure-history-row ${record.status === 'undone' ? 'is-undone' : ''}"><span class="history-mark">${folderChange ? '夹' : 'AI'}</span><div><strong>${escapeHtml(title)}</strong><p>${escapeHtml(record.rationale || '')}</p><small>${date}${record.status === 'undone' ? ' · 已撤销' : ''}</small></div>${record.status === 'applied' ? `<button type="button" data-undo-restructure="${record.id}">撤销</button>` : '<span class="history-status">已撤销</span>'}</article>`;
-  }).join('') : '<div class="structure-empty">还没有结构调整记录</div>';
+    return `<article class="rollback-row ${record.status === 'undone' ? 'is-undone' : ''}"><span class="history-mark">${folderChange ? '夹' : 'AI'}</span><div><strong>${escapeHtml(title)}</strong><p>${escapeHtml(record.rationale || '')}</p><small>${date}${record.status === 'undone' ? ' · 已恢复' : ''}</small></div>${record.status === 'applied' ? `<button type="button" data-undo-restructure="${record.id}">恢复</button>` : '<span class="history-status">已恢复</span>'}</article>`;
+  }).join('') : '<div class="structure-empty">还没有可回退的结构快照</div>';
 }
 
-function toggleStructurePanel(show = elements.structurePanel.hidden) {
-  elements.structurePanel.hidden = !show;
-  elements.structureButton.setAttribute('aria-expanded', String(show));
+function toggleRollbackPanel(show = elements.rollbackPanel.hidden) {
+  elements.rollbackPanel.hidden = !show;
+  elements.rollbackButton.setAttribute('aria-expanded', String(show));
   if (show) {
     elements.filterPanel.hidden = true;
     elements.filterButton.setAttribute('aria-expanded', 'false');
-    renderStructurePanel();
+    renderRollbackHistory();
   }
 }
 
-async function generateRestructure() {
-  if (state.structureBusy) return;
-  state.structureBusy = true;
-  const button = document.querySelector('#generateRestructure');
-  button.disabled = true;
-  button.textContent = 'Agent 正在分析…';
-  try {
-    state.restructurePreview = await api('/api/restructure/preview', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope: elements.restructureScope.value }) });
-    renderStructurePanel();
-    showToast(state.restructurePreview.changes.length ? '重构方案已生成，请查看对照' : 'Agent 建议保留当前结构');
-  } catch (error) { showToast(error.message); }
-  finally {
-    state.structureBusy = false;
-    button.disabled = false;
-    button.textContent = '生成对照';
-  }
+function cancelRestructureSelection() {
+  state.restructureSelecting = false;
+  state.selectedStructureFolders.clear();
+  renderNavigation();
 }
 
-async function applyRestructure() {
-  const preview = state.restructurePreview;
-  if (!preview || state.structureBusy) return;
-  const selected = [...elements.restructurePreview.querySelectorAll('[data-restructure-change]:checked')].map(input => preview.changes[Number(input.dataset.restructureChange)]).filter(Boolean);
-  if (!selected.length) return showToast('请至少选择一项调整');
-  state.structureBusy = true;
-  try {
-    await api('/api/restructure/apply', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scope: preview.scope, rationale: preview.rationale, changes: selected }) });
-    state.restructurePreview = null;
-    await load({ quiet: true });
-    renderStructurePanel();
-    showToast('目录结构已更新，知识图谱已同步');
-  } catch (error) { showToast(error.message); }
-  finally { state.structureBusy = false; }
-}
-
-async function moveFolder() {
+async function runSelectedRestructure() {
   if (state.structureBusy) return;
-  const source = elements.folderMoveSource.value;
-  const name = elements.folderMoveName.value.trim();
-  if (!source || !name) return showToast('请选择文件夹并填写新名称');
+  if (!state.selectedStructureFolders.size) return showToast('请先在左侧勾选要重构的文件夹');
   state.structureBusy = true;
+  renderNavigation();
   try {
-    await api('/api/library/folders', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source, name, parent: elements.folderMoveParent.value }) });
-    elements.folderMoveName.value = '';
+    const result = await api('/api/restructure/run', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scopes: [...state.selectedStructureFolders] }) });
+    state.restructureSelecting = false;
+    state.selectedStructureFolders.clear();
     await load({ quiet: true });
-    renderStructurePanel();
-    showToast('文件夹已调整，资料关联保持不变');
+    showToast(result.status === 'unchanged' ? 'Agent 建议保留当前结构' : `已重构 ${result.changes.length} 项资料，快照已保存`);
   } catch (error) { showToast(error.message); }
-  finally { state.structureBusy = false; }
+  finally { state.structureBusy = false; renderNavigation(); }
 }
 
 async function undoRestructure(id) {
@@ -448,10 +405,9 @@ async function undoRestructure(id) {
   state.structureBusy = true;
   try {
     await api(`/api/restructure/${id}/undo`, { method: 'POST' });
-    elements.folderMoveName.value = '';
     await load({ quiet: true });
-    renderStructurePanel();
-    showToast('结构调整已撤销，知识图谱已同步');
+    renderRollbackHistory();
+    showToast('已恢复旧目录，新加入的资料保持原位');
   } catch (error) { showToast(error.message); }
   finally { state.structureBusy = false; }
 }
@@ -504,6 +460,38 @@ function typeClass(item) {
   return ['pdf', 'video', 'image'].includes(item.kind) ? item.kind : '';
 }
 
+function findFolderNode(path, nodes = state.tree?.children || []) {
+  for (const node of nodes) {
+    if (node.path === path) return node;
+    const found = findFolderNode(path, node.children || []);
+    if (found) return found;
+  }
+  return null;
+}
+
+function itemRowHtml(item) {
+  return `<div class="item-row file-browser-row ${item.id === state.selectedId ? 'is-active' : ''}" data-id="${item.id}" tabindex="0">
+    <span class="item-type ${typeClass(item)}">${escapeHtml(kindNames[item.kind] || 'FILE')}</span>
+    <span class="item-title">
+      <strong>${item.favorite ? '<span class="item-favorite">★</span>' : ''}${escapeHtml(item.title)}</strong>
+      <small class="${state.query && state.searchMatches.get(item.id)?.snippet ? 'search-snippet' : ''}">${state.query && state.searchMatches.get(item.id)?.snippet ? escapeHtml(state.searchMatches.get(item.id).snippet) : item.status === 'review' ? `待检查 · ${escapeHtml(item.review_reason || item.category || '需要人工复查')}` : `<span class="reading-dot ${item.reading_status === 'read' ? 'read' : ''}"></span>${escapeHtml(readingNames[item.reading_status] || '未读')} · ${escapeHtml(item.category || '未分类')}`}</small>
+    </span>
+    <span class="item-tags">${(item.tags || []).slice(0, 2).map(tag => `<span class="mini-tag">${escapeHtml(tag)}</span>`).join('')}</span>
+    <span class="item-date ${item.status === 'review' ? 'review-badge' : ''}">${escapeHtml(item.published_at || item.received_at || '日期未知')}</span>
+    ${item.status === 'ready' ? `<button class="row-move-button" type="button" data-move-item="${item.id}" aria-label="移动 ${escapeHtml(item.title)}">移动</button>` : '<span></span>'}
+  </div>`;
+}
+
+function folderRowHtml(folder) {
+  return `<div class="item-row folder-browser-row" data-open-folder="${escapeHtml(folder.path)}" tabindex="0">
+    <span class="item-type folder-type">夹</span>
+    <span class="item-title"><strong>${escapeHtml(folder.name)}</strong><small>${folder.children?.length || 0} 个子文件夹 · ${folder.count} 项资料</small></span>
+    <span class="item-tags"><span class="mini-tag">文件夹</span></span>
+    <span class="item-date">进入 ›</span>
+    <button class="row-move-button" type="button" data-move-folder="${escapeHtml(folder.path)}" aria-label="移动 ${escapeHtml(folder.name)}">移动</button>
+  </div>`;
+}
+
 function renderList() {
   if (state.scope === 'inbox') {
     const query = state.query.trim().toLocaleLowerCase('zh-CN');
@@ -527,22 +515,23 @@ function renderList() {
       </div>`).join('') : '<div class="empty-list">拖动文件到左侧收件箱，即可在这里暂存</div>';
     return;
   }
-  const items = filteredItems();
+  const directoryScope = state.scope === 'all' || state.scope === 'category';
+  const browsingDirectory = directoryScope && !state.query.trim() && activeFilterCount() === 0;
+  const currentPath = state.scope === 'category' ? state.category : '';
+  const currentNode = currentPath ? findFolderNode(currentPath) : state.tree;
+  const folders = browsingDirectory ? currentNode?.children || [] : [];
+  const items = browsingDirectory
+    ? state.items.filter(item => item.status === 'ready' && item.category === currentPath)
+    : filteredItems();
   const title = state.scope === 'review' ? '待检查' : state.scope === 'recent' ? '最近添加' : state.scope === 'favorites' ? '收藏' : state.scope === 'unread' ? '未读' : state.scope === 'category' ? state.category.split('/').at(-1) : '全部资料';
   elements.collectionTitle.textContent = state.graphMode ? '知识图谱' : title;
-  elements.collectionPath.textContent = state.graphMode ? 'KNOWLEDGE HOME' : state.scope === 'category' ? `LIBRARY / ${state.category.toUpperCase()}` : 'KNOWLEDGE LIBRARY';
-  elements.resultCount.textContent = `${items.length} 项资料`;
-  if (!items.some(item => item.id === state.selectedId)) state.selectedId = state.graphMode ? null : items[0]?.id || null;
-  elements.list.innerHTML = items.length ? items.map(item => `
-    <button class="item-row ${item.id === state.selectedId ? 'is-active' : ''}" data-id="${item.id}">
-      <span class="item-type ${typeClass(item)}">${escapeHtml(kindNames[item.kind] || 'FILE')}</span>
-      <span class="item-title">
-        <strong>${item.favorite ? '<span class="item-favorite">★</span>' : ''}${escapeHtml(item.title)}</strong>
-        <small class="${state.query && state.searchMatches.get(item.id)?.snippet ? 'search-snippet' : ''}">${state.query && state.searchMatches.get(item.id)?.snippet ? escapeHtml(state.searchMatches.get(item.id).snippet) : item.status === 'review' ? `待检查 · ${escapeHtml(item.review_reason || item.category || '需要人工复查')}` : `<span class="reading-dot ${item.reading_status === 'read' ? 'read' : ''}"></span>${escapeHtml(readingNames[item.reading_status] || '未读')} · ${escapeHtml(item.category || '未分类')}`}</small>
-      </span>
-      <span class="item-tags">${(item.tags || []).slice(0, 2).map(tag => `<span class="mini-tag">${escapeHtml(tag)}</span>`).join('')}</span>
-      <span class="item-date ${item.status === 'review' ? 'review-badge' : ''}">${escapeHtml(item.published_at || item.received_at || '日期未知')}</span>
-    </button>`).join('') : '<div class="empty-list">这里暂时没有资料</div>';
+  elements.collectionPath.textContent = state.graphMode ? 'KNOWLEDGE HOME' : currentPath ? `LIBRARY / ${currentPath.toUpperCase()}` : 'KNOWLEDGE LIBRARY';
+  elements.resultCount.textContent = browsingDirectory ? `${folders.length} 个文件夹 · ${items.length} 个文件` : `${items.length} 项资料`;
+  elements.list.closest('.catalog')?.querySelector('.catalog-hint')?.replaceChildren(document.createTextNode(browsingDirectory ? '进入文件夹，或选择文件打开预览' : '选择一项即可在下方阅读'));
+  if (!items.some(item => item.id === state.selectedId)) state.selectedId = null;
+  elements.contentColumn.classList.toggle('is-folder-browser', browsingDirectory && !state.selectedId && !state.graphMode);
+  const rows = [...folders.map(folderRowHtml), ...items.map(itemRowHtml)];
+  elements.list.innerHTML = rows.length ? rows.join('') : '<div class="empty-list">当前文件夹为空，可从左侧新建子文件夹</div>';
 }
 
 function graphData() {
@@ -1021,17 +1010,46 @@ function relationBuilderHtml(candidates) {
     </div>`;
 }
 
-function folderOptionsHtml(selectedCategory) {
-  const folders = [];
-  const visit = (nodes, depth = 0) => nodes.forEach(node => {
-    folders.push({ path: node.path, name: node.name, depth });
-    visit(node.children || [], depth + 1);
-  });
-  visit(state.tree?.children || []);
-  if (selectedCategory && !folders.some(folder => folder.path === selectedCategory)) {
-    folders.push({ path: selectedCategory, name: selectedCategory.split('/').at(-1), depth: selectedCategory.includes('/') ? 1 : 0 });
-  }
-  return folders.map(folder => `<option value="${escapeHtml(folder.path)}" ${folder.path === selectedCategory ? 'selected' : ''}>${folder.depth ? '↳ ' : ''}${escapeHtml(folder.name)}</option>`).join('');
+function moveMenuBranchHtml(nodes, sourceFolder = '') {
+  return nodes.map(node => {
+    if (sourceFolder && (node.path === sourceFolder || node.path.startsWith(`${sourceFolder}/`))) return '';
+    const children = moveMenuBranchHtml(node.children || [], sourceFolder);
+    return `<div class="move-menu-branch"><button type="button" data-move-destination="${escapeHtml(node.path)}"><span>▱ ${escapeHtml(node.name)}</span>${children ? '<b>›</b>' : ''}</button>${children ? `<div class="move-menu-submenu">${children}</div>` : ''}</div>`;
+  }).join('');
+}
+
+function openMoveMenu(entity, anchor) {
+  state.moveEntity = entity;
+  const branches = moveMenuBranchHtml(state.tree?.children || [], entity.type === 'folder' ? entity.path : '');
+  elements.movePopover.innerHTML = `${entity.type === 'folder' ? '<button class="move-root-option" type="button" data-move-destination=""><span>⌂ Library</span></button>' : ''}<div class="move-menu-tree">${branches || '<div class="move-menu-empty">没有可用的目标文件夹</div>'}</div>`;
+  elements.movePopover.hidden = false;
+  const rect = anchor.getBoundingClientRect();
+  elements.movePopover.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 230))}px`;
+  elements.movePopover.style.top = `${Math.max(8, Math.min(rect.bottom + 5, window.innerHeight - 330))}px`;
+}
+
+function closeMoveMenu() {
+  state.moveEntity = null;
+  elements.movePopover.hidden = true;
+}
+
+async function performMove(destination) {
+  const entity = state.moveEntity;
+  if (!entity || state.busyAction) return;
+  closeMoveMenu();
+  state.busyAction = true;
+  try {
+    if (entity.type === 'item') {
+      if (!destination) throw new Error('资料必须放在一个文件夹中');
+      await api(`/api/items/${entity.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ category: destination }) });
+    } else {
+      await api('/api/library/folders', { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source: entity.path, name: entity.path.split('/').at(-1), parent: destination }) });
+    }
+    state.selectedId = entity.type === 'item' ? entity.id : null;
+    await load({ quiet: true });
+    showToast(entity.type === 'item' ? '资料已移动' : '文件夹已移动，资料关联保持不变');
+  } catch (error) { showToast(error.message); }
+  finally { state.busyAction = false; }
 }
 
 function renderInspector() {
@@ -1086,8 +1104,6 @@ function renderInspector() {
       <textarea class="edit-textarea" id="editSummary" maxlength="20000">${escapeHtml(item.summary || '')}</textarea>
       <label class="edit-label" for="editTags">标签</label>
       <input class="edit-input" id="editTags" value="${escapeHtml((item.tags || []).join('，'))}" placeholder="使用逗号分隔，最多 8 个">
-      <label class="edit-label" for="editCategory">所在文件夹</label>
-      <select class="edit-input edit-folder-select" id="editCategory">${folderOptionsHtml(item.category)}</select>
       <div class="edit-relation-block">
         <p class="inspector-label">建立关联</p>
         ${relationBuilderHtml(relationCandidates)}
@@ -1425,12 +1441,11 @@ async function saveItemEdits() {
   const title = elements.inspector.querySelector('#editTitle')?.value.trim();
   const summary = elements.inspector.querySelector('#editSummary')?.value || '';
   const tags = (elements.inspector.querySelector('#editTags')?.value || '').split(/[,，、\n]/).map(tag => tag.trim()).filter(Boolean);
-  const category = elements.inspector.querySelector('#editCategory')?.value || item.category;
   if (!title) return showToast('标题不能为空');
   state.busyAction = true;
   try {
     await api(`/api/items/${item.id}`, {
-      method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title, summary, tags, category }),
+      method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title, summary, tags }),
     });
     state.editingItemId = null;
     await load({ quiet: true });
@@ -1443,15 +1458,13 @@ async function saveItemEdits() {
   }
 }
 
-async function createFolder() {
-  const name = elements.folderName.value.trim();
-  const parent = elements.folderParent.value;
+async function createFolder(parent = state.creatingFolderParent || '') {
+  const input = elements.tree.querySelector('[data-folder-name]');
+  const name = input?.value.trim() || '';
   if (!name) return showToast('请输入文件夹名称');
   try {
     const folder = await api('/api/library/folders', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, parent }) });
-    elements.folderName.value = '';
-    elements.folderCreator.hidden = true;
-    elements.newFolderButton.setAttribute('aria-expanded', 'false');
+    state.creatingFolderParent = null;
     await load({ quiet: true });
     state.scope = 'category';
     state.category = folder.path;
@@ -1561,7 +1574,7 @@ async function load({ quiet = false } = {}) {
     if (treeResult.status === 'rejected') throw treeResult.reason;
     state.items = itemsResult.value;
     state.tree = treeResult.value;
-    state.backendCompatible = healthResult.status === 'fulfilled' && Number(healthResult.value.api_version) >= 8;
+    state.backendCompatible = healthResult.status === 'fulfilled' && Number(healthResult.value.api_version) >= 9;
     state.inboxAvailable = state.backendCompatible && inboxResult.status === 'fulfilled';
     state.inboxFiles = state.inboxAvailable ? inboxResult.value : [];
     state.savedViews = viewsResult.status === 'fulfilled' ? viewsResult.value : [];
@@ -1572,7 +1585,7 @@ async function load({ quiet = false } = {}) {
     render();
     setGraphMode(state.graphMode);
     renderFilterPanel();
-    if (!elements.structurePanel.hidden) renderStructurePanel();
+    if (!elements.rollbackPanel.hidden) renderRollbackHistory();
     if (state.query) await runSearch();
     if (state.graphMode) renderGraph();
     if (state.navigationIndex < 0) pushNavigation();
@@ -1585,14 +1598,65 @@ async function load({ quiet = false } = {}) {
 }
 
 document.addEventListener('click', event => {
-  if (event.target.closest('[data-apply-restructure]')) { applyRestructure(); return; }
   const undoStructure = event.target.closest('[data-undo-restructure]');
   if (undoStructure) { undoRestructure(undoStructure.dataset.undoRestructure); return; }
-  if (event.target.closest('[data-folder-create]')) { createFolder(); return; }
+  const restructureFolder = event.target.closest('[data-restructure-folder]');
+  if (restructureFolder) {
+    event.preventDefault(); event.stopPropagation();
+    const path = restructureFolder.dataset.restructureFolder ?? '';
+    const selection = structureSelectionState(path);
+    if (selection.locked) return;
+    if (state.selectedStructureFolders.has(path)) state.selectedStructureFolders.delete(path);
+    else {
+      state.selectedStructureFolders.add(path);
+      for (const selected of [...state.selectedStructureFolders]) if (selected !== path && selected.startsWith(`${path}/`)) state.selectedStructureFolders.delete(selected);
+    }
+    renderNavigation();
+    return;
+  }
+  const newFolder = event.target.closest('[data-new-folder-parent]');
+  if (newFolder) {
+    state.creatingFolderParent = newFolder.dataset.newFolderParent;
+    state.collapsedFolders.delete(state.creatingFolderParent);
+    renderNavigation();
+    requestAnimationFrame(() => elements.tree.querySelector('[data-folder-name]')?.focus());
+    return;
+  }
+  const folderCreate = event.target.closest('[data-folder-create]');
+  if (folderCreate) { createFolder(folderCreate.dataset.parent || ''); return; }
   if (event.target.closest('[data-folder-cancel]')) {
-    elements.folderCreator.hidden = true;
-    elements.newFolderButton.setAttribute('aria-expanded', 'false');
-    elements.folderName.value = '';
+    state.creatingFolderParent = null;
+    renderNavigation();
+    return;
+  }
+  const moveItem = event.target.closest('[data-move-item]');
+  if (moveItem) {
+    event.stopPropagation();
+    const item = state.items.find(value => value.id === moveItem.dataset.moveItem);
+    if (item) openMoveMenu({ type: 'item', id: item.id, title: item.title }, moveItem);
+    return;
+  }
+  const moveFolderButton = event.target.closest('[data-move-folder]');
+  if (moveFolderButton) {
+    event.stopPropagation();
+    openMoveMenu({ type: 'folder', path: moveFolderButton.dataset.moveFolder }, moveFolderButton);
+    return;
+  }
+  const moveDestination = event.target.closest('[data-move-destination]');
+  if (moveDestination) {
+    performMove(moveDestination.dataset.moveDestination);
+    return;
+  }
+  if (!event.target.closest('#movePopover')) closeMoveMenu();
+  const openFolder = event.target.closest('[data-open-folder]');
+  if (openFolder) {
+    state.scope = 'category';
+    state.category = openFolder.dataset.openFolder;
+    state.selectedId = null;
+    state.editingItemId = null;
+    setGraphMode(false);
+    render();
+    pushNavigation();
     return;
   }
   const relationCascadeToggle = event.target.closest('[data-relation-cascade-toggle]');
@@ -1704,6 +1768,7 @@ document.addEventListener('click', event => {
   if (nav) {
     state.scope = nav.dataset.scope;
     state.category = '';
+    state.selectedId = null;
     state.editingItemId = null;
     setGraphMode(false);
     if (state.scope === 'inbox') setReadingMode(false);
@@ -1715,6 +1780,7 @@ document.addEventListener('click', event => {
   if (category) {
     state.scope = 'category';
     state.category = category.dataset.category;
+    state.selectedId = null;
     state.editingItemId = null;
     setGraphMode(false);
     render();
@@ -1847,6 +1913,14 @@ document.addEventListener('change', event => {
 });
 
 document.addEventListener('pointerover', event => {
+  const moveOption = event.target.closest('.move-menu-branch > button');
+  const moveSubmenu = moveOption?.nextElementSibling;
+  if (moveSubmenu?.matches('.move-menu-submenu')) {
+    const rect = moveOption.getBoundingClientRect();
+    const openLeft = rect.right + 210 > window.innerWidth;
+    moveSubmenu.style.left = `${openLeft ? Math.max(8, rect.left - 212) : rect.right + 3}px`;
+    moveSubmenu.style.top = `${Math.max(8, Math.min(rect.top - 5, window.innerHeight - 295))}px`;
+  }
   const option = event.target.closest('.relation-cascade-option');
   const submenu = option?.nextElementSibling;
   if (!submenu?.matches('.relation-level-two, .relation-level-three')) return;
@@ -1863,21 +1937,27 @@ elements.search.addEventListener('input', event => {
 });
 
 document.querySelector('#refreshButton').addEventListener('click', () => load());
-elements.newFolderButton.addEventListener('click', () => {
-  elements.folderCreator.hidden = !elements.folderCreator.hidden;
-  elements.newFolderButton.setAttribute('aria-expanded', String(!elements.folderCreator.hidden));
-  if (!elements.folderCreator.hidden) elements.folderName.focus();
+elements.structureButton.addEventListener('click', () => {
+  if (state.restructureSelecting) runSelectedRestructure();
+  else {
+    toggleRollbackPanel(false);
+    state.restructureSelecting = true;
+    state.selectedStructureFolders.clear();
+    renderNavigation();
+    showToast('请在左侧勾选需要重构的文件夹');
+  }
 });
-elements.structureButton.addEventListener('click', () => toggleStructurePanel());
-document.querySelector('#structureClose').addEventListener('click', () => toggleStructurePanel(false));
-document.querySelector('#generateRestructure').addEventListener('click', generateRestructure);
-document.querySelector('#moveFolderButton').addEventListener('click', moveFolder);
-elements.folderMoveSource.addEventListener('change', () => {
-  elements.folderMoveName.value = elements.folderMoveSource.value.split('/').at(-1) || '';
-  const sourceTop = elements.folderMoveSource.value.split('/')[0];
-  if (elements.folderMoveParent.value === sourceTop) elements.folderMoveParent.value = '';
+elements.structureCancelButton.addEventListener('click', cancelRestructureSelection);
+elements.rollbackButton.addEventListener('click', () => toggleRollbackPanel());
+document.querySelector('#rollbackClose').addEventListener('click', () => toggleRollbackPanel(false));
+elements.tree.addEventListener('keydown', event => { if (event.key === 'Enter' && event.target.matches('[data-folder-name]')) createFolder(); });
+elements.list.addEventListener('keydown', event => {
+  if (event.key !== 'Enter' && event.key !== ' ') return;
+  const row = event.target.closest('[data-open-folder], [data-id]');
+  if (!row) return;
+  event.preventDefault();
+  row.click();
 });
-elements.folderName.addEventListener('keydown', event => { if (event.key === 'Enter') createFolder(); });
 elements.backButton.addEventListener('click', goBack);
 elements.forwardButton.addEventListener('click', goForward);
 elements.filterButton.addEventListener('click', () => toggleFilterPanel());

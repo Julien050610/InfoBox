@@ -151,7 +151,7 @@ test('uploads, files, deduplicates, and updates manual quality score', async () 
     const workbench = await fetch(base);
     assert.match(await workbench.text(), /InfoBox/);
     const health = await (await fetch(`${base}/health`)).json();
-    assert.equal(health.api_version, 8);
+    assert.equal(health.api_version, 9);
     const pdfRuntime = await fetch(`${base}/vendor/pdf.mjs`);
     assert.equal(pdfRuntime.status, 200);
     assert.match(await pdfRuntime.text(), /getDocument/);
@@ -417,6 +417,61 @@ test('previews, applies, and undoes taxonomy changes without breaking relations'
     assert.equal((await fetch(`${base}/api/restructure/${folderRecord.id}/undo`, { method: 'POST' })).status, 200);
     assert.equal((await library.items()).find(item => item.id === records[1].id).category, 'Computer Science/Agent');
     assert.equal((await library.relations()).length, 1);
+  } finally {
+    library.close();
+    await new Promise(resolve => server.close(resolve));
+    if (!root.startsWith(join(tmpdir(), 'infobox-test-'))) throw new Error('Unsafe test cleanup path');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('supports deep folders and snapshot rollback without moving later items', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'infobox-test-'));
+  const originalId = '77777777-7777-4777-8777-777777777777';
+  const outsideId = '88888888-8888-4888-8888-888888888888';
+  const library = new Library({ root, restructure: async items => ({
+    rationale: '补全稳定的学科层级。',
+    changes: items.map(item => ({ item_id: item.id, category: 'Computer Science/AI/强化学习/策略优化', reason: '补充学科上下文。', confidence: 0.95 })),
+    provider: 'test', model: 'test-model',
+  }) });
+  await library.init({ watchInbox: false });
+  const writeItem = async (id, title, category) => {
+    const folder = join(root, 'library', ...category.split('/'));
+    await mkdir(folder, { recursive: true });
+    const stem = join(folder, title);
+    const asset = `${stem}.pdf`;
+    await writeFile(asset, 'pdf');
+    await writeFile(`${stem}.txt`, '正文');
+    await writeFile(`${stem}.md`, `# ${title}`);
+    await writeFile(`${stem}.json`, JSON.stringify({ id, title, category, tags: [], status: 'ready', kind: 'pdf', summary: '摘要', quality_score: null, published_at: null, received_at: '2026-09-23', asset_path: asset, original_name: `${title}.pdf` }));
+  };
+  await writeItem(originalId, '策略优化', '强化学习');
+  await writeItem(outsideId, '细胞生物学', 'Biology');
+  const server = createApi(library);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    await library.addFolder({ name: 'Computer Science' });
+    await library.addFolder({ name: 'AI', parent: 'Computer Science' });
+    await library.addFolder({ name: '强化学习', parent: 'Computer Science/AI' });
+    const deep = await library.addFolder({ name: '实验', parent: 'Computer Science/AI/强化学习' });
+    assert.equal(deep.path, 'Computer Science/AI/强化学习/实验');
+
+    const run = await fetch(`${base}/api/restructure/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scopes: ['强化学习'] }) });
+    assert.equal(run.status, 201);
+    const record = await run.json();
+    assert.equal(record.snapshot.items.length, 2);
+    assert.equal((await library.items()).find(item => item.id === originalId).category, 'Computer Science/AI/强化学习/策略优化');
+    assert.equal((await library.items()).find(item => item.id === outsideId).category, 'Biology');
+
+    const laterId = '99999999-9999-4999-8999-999999999999';
+    await writeItem(laterId, '后加入资料', 'Computer Science/AI/强化学习/策略优化');
+    const undo = await fetch(`${base}/api/restructure/${record.id}/undo`, { method: 'POST' });
+    assert.equal(undo.status, 200);
+    const restored = await library.items();
+    assert.equal(restored.find(item => item.id === originalId).category, '强化学习');
+    assert.equal(restored.find(item => item.id === laterId).category, 'Computer Science/AI/强化学习/策略优化');
+    assert.equal((await library.restructureHistory())[0].status, 'undone');
   } finally {
     library.close();
     await new Promise(resolve => server.close(resolve));

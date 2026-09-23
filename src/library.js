@@ -226,14 +226,14 @@ export class Library {
 
   async folders() {
     return (await readJsonArray(this.foldersFile))
-      .map(value => String(value || '').split('/').map(safePart).filter(Boolean).slice(0, 2).join('/'))
+      .map(value => String(value || '').split('/').map(safePart).filter(Boolean).join('/'))
       .filter(Boolean);
   }
 
   async categories() {
     const paths = new Set();
     const add = value => {
-      const parts = String(value || '').split('/').map(safePart).filter(Boolean).slice(0, 2);
+      const parts = String(value || '').split('/').map(safePart).filter(Boolean);
       parts.forEach((_, index) => paths.add(parts.slice(0, index + 1).join('/')));
     };
     (await this.folders()).forEach(add);
@@ -250,9 +250,7 @@ export class Library {
     const rawName = String(payload?.name || '').trim();
     const name = safePart(rawName);
     if (!name || name !== rawName || name.includes('/')) throw new Error('Folder name is invalid');
-    const parentParts = String(payload?.parent || '').split('/').map(safePart).filter(Boolean);
-    if (parentParts.length > 1) throw new Error('Folders support at most two levels');
-    const parent = parentParts[0] || '';
+    const parent = String(payload?.parent || '').split('/').map(safePart).filter(Boolean).join('/');
     const categories = await this.categories();
     if (parent && !categories.includes(parent)) throw new Error('Parent folder does not exist');
     const path = parent ? `${parent}/${name}` : name;
@@ -270,22 +268,26 @@ export class Library {
   }
 
   async writeRestructureHistory(records) {
-    await writeFile(this.restructureHistoryFile, json(records.slice(-100)));
+    await writeFile(this.restructureHistoryFile, json(records));
   }
 
   normalizeCategory(value) {
     const raw = String(value || '').trim();
     const parts = raw.split('/').map(safePart).filter(Boolean);
-    if (!raw || parts.length < 1 || parts.length > 2 || parts.join('/') !== raw) throw new Error('Category must contain one or two valid folder levels');
+    if (!raw || parts.length < 1 || parts.length > 32 || parts.join('/') !== raw) throw new Error('Category must contain valid folder levels');
     return parts.join('/');
   }
 
-  async previewRestructure(payload = {}) {
-    const scope = String(payload.scope || '').trim();
-    if (scope && !(await this.categories()).includes(scope)) throw new Error('Restructure scope folder does not exist');
-    const items = (await this.items()).filter(item => item.status === 'ready' && (!scope || item.category === scope || item.category.startsWith(`${scope}/`)));
-    if (!items.length) throw new Error('Restructure scope contains no items');
-    const proposal = await this.restructure(items, { categories: await this.categories(), scope });
+  async structureSnapshot() {
+    const [folders, categories, items, views] = await Promise.all([this.folders(), this.categories(), this.items(), this.savedViews()]);
+    return {
+      created_at: new Date().toISOString(), folders, categories,
+      items: items.filter(item => item.status === 'ready').map(item => ({ item_id: item.id, category: item.category })),
+      views: views.map(view => ({ id: view.id, category: view.category || '' })),
+    };
+  }
+
+  proposalChanges(items, proposal) {
     const byId = new Map(items.map(item => [item.id, item]));
     const seen = new Set();
     const changes = [];
@@ -301,6 +303,29 @@ export class Library {
         confidence: Math.max(0, Math.min(1, Number(candidate.confidence) || 0)),
       });
     }
+    return changes;
+  }
+
+  generatedFolderPaths(changes, snapshot) {
+    const existing = new Set(snapshot.categories || []);
+    const generated = new Set();
+    for (const change of changes) {
+      const parts = change.to.split('/');
+      parts.forEach((_, index) => {
+        const path = parts.slice(0, index + 1).join('/');
+        if (!existing.has(path)) generated.add(path);
+      });
+    }
+    return [...generated].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  }
+
+  async previewRestructure(payload = {}) {
+    const scope = String(payload.scope || '').trim();
+    if (scope && !(await this.categories()).includes(scope)) throw new Error('Restructure scope folder does not exist');
+    const items = (await this.items()).filter(item => item.status === 'ready' && (!scope || item.category === scope || item.category.startsWith(`${scope}/`)));
+    if (!items.length) throw new Error('Restructure scope contains no items');
+    const proposal = await this.restructure(items, { categories: await this.categories(), scope });
+    const changes = this.proposalChanges(items, proposal);
     return {
       id: randomUUID(), scope, rationale: String(proposal.rationale || '').trim().slice(0, 3000),
       changes, created_at: new Date().toISOString(), provider: proposal.provider || null, model: proposal.model || null,
@@ -340,10 +365,43 @@ export class Library {
       if (from === to) throw new Error('Restructure change must move an item');
       return { item_id: item.id, title: item.title, from, to, reason: String(change.reason || '').slice(0, 500), confidence: Math.max(0, Math.min(1, Number(change.confidence) || 0)) };
     });
+    const snapshot = await this.structureSnapshot();
     await this.moveItems(changes);
     const record = {
       id: randomUUID(), type: 'agent', status: 'applied', scope: String(payload.scope || ''),
-      rationale: String(payload.rationale || '').slice(0, 3000), changes,
+      rationale: String(payload.rationale || '').slice(0, 3000), changes, snapshot,
+      generated_folders: this.generatedFolderPaths(changes, snapshot),
+      created_at: new Date().toISOString(), undone_at: null,
+    };
+    const history = await readJsonArray(this.restructureHistoryFile);
+    history.push(record);
+    try {
+      await this.writeRestructureHistory(history);
+    } catch (error) {
+      await this.moveItems([...changes].reverse(), 'reverse').catch(() => {});
+      throw error;
+    }
+    return record;
+  }
+
+  async runRestructure(payload = {}) {
+    const categories = await this.categories();
+    const requested = Array.isArray(payload.scopes) ? payload.scopes : [];
+    const normalized = [...new Set(requested.map(value => String(value || '').trim()).map(value => value ? this.normalizeCategory(value) : ''))];
+    if (!normalized.length) throw new Error('Select at least one folder to restructure');
+    if (normalized.some(scope => scope && !categories.includes(scope))) throw new Error('Restructure scope folder does not exist');
+    const scopes = normalized.filter(scope => !normalized.some(parent => parent !== scope && (!parent || scope.startsWith(`${parent}/`))));
+    const items = (await this.items()).filter(item => item.status === 'ready' && scopes.some(scope => !scope || item.category === scope || item.category.startsWith(`${scope}/`)));
+    if (!items.length) throw new Error('Selected folders contain no items');
+    const proposal = await this.restructure(items, { categories, scopes });
+    const changes = this.proposalChanges(items, proposal);
+    if (!changes.length) return { status: 'unchanged', scopes, changes: [], rationale: String(proposal.rationale || '').slice(0, 3000) };
+    const snapshot = await this.structureSnapshot();
+    await this.moveItems(changes);
+    const record = {
+      id: randomUUID(), type: 'agent', status: 'applied', scopes,
+      rationale: String(proposal.rationale || '').slice(0, 3000), changes, snapshot,
+      generated_folders: this.generatedFolderPaths(changes, snapshot),
       created_at: new Date().toISOString(), undone_at: null,
     };
     const history = await readJsonArray(this.restructureHistoryFile);
@@ -364,7 +422,6 @@ export class Library {
     if (!name || name !== rawName || name.includes('/')) throw new Error('Folder name is invalid');
     const parent = String(payload.parent || '').trim();
     const parentPath = parent ? this.normalizeCategory(parent) : '';
-    if (parentPath && parentPath.includes('/')) throw new Error('Folder parent must be a first-level folder');
     const target = parentPath ? `${parentPath}/${name}` : name;
     if (source === target) throw new Error('Folder location is unchanged');
     const categories = await this.categories();
@@ -374,7 +431,6 @@ export class Library {
     if (categories.includes(target)) throw new Error('Target folder already exists');
     const affectedPaths = categories.filter(path => path === source || path.startsWith(`${source}/`));
     const folderMapping = affectedPaths.map(from => ({ from, to: `${target}${from.slice(source.length)}` }));
-    if (folderMapping.some(change => change.to.split('/').length > 2)) throw new Error('This move would create more than two folder levels');
     const items = (await this.items()).filter(item => item.status === 'ready' && (item.category === source || item.category.startsWith(`${source}/`)));
     const changes = items.map(item => ({ item_id: item.id, title: item.title, from: item.category, to: `${target}${item.category.slice(source.length)}`, reason: '文件夹调整', confidence: 1 }));
     const foldersBefore = await this.folders();
@@ -382,6 +438,7 @@ export class Library {
     const views = await this.savedViews();
     const viewsBefore = JSON.parse(JSON.stringify(views));
     const viewChanges = views.filter(view => view.category === source || view.category?.startsWith(`${source}/`)).map(view => ({ id: view.id, from: view.category, to: `${target}${view.category.slice(source.length)}` }));
+    const snapshot = await this.structureSnapshot();
     await this.moveItems(changes);
     try {
       await writeFile(this.foldersFile, json(foldersAfter));
@@ -400,7 +457,12 @@ export class Library {
     }
     const record = {
       id: randomUUID(), type: 'folder', status: 'applied', scope: source,
-      rationale: `文件夹 ${source} 调整为 ${target}`, changes, folder_change: { source, target, folder_mapping: folderMapping, view_changes: viewChanges },
+      rationale: `文件夹 ${source} 调整为 ${target}`, changes, snapshot,
+      generated_folders: [...new Set([
+        ...this.generatedFolderPaths(changes, snapshot),
+        ...folderMapping.map(change => change.to).filter(path => !snapshot.categories.includes(path)),
+      ])],
+      folder_change: { source, target, folder_mapping: folderMapping, view_changes: viewChanges },
       created_at: new Date().toISOString(), undone_at: null,
     };
     const history = await readJsonArray(this.restructureHistoryFile);
@@ -421,6 +483,29 @@ export class Library {
     const record = history.find(value => value.id === id);
     if (!record) return null;
     if (record.status !== 'applied') throw new Error('This structure change has already been undone');
+    if (record.snapshot) {
+      const currentItems = new Map((await this.items()).filter(item => item.status === 'ready').map(item => [item.id, item]));
+      const restoreChanges = record.snapshot.items.flatMap(saved => {
+        const item = currentItems.get(saved.item_id);
+        return item && item.category !== saved.category ? [{ item_id: item.id, title: item.title, from: saved.category, to: item.category }] : [];
+      });
+      await this.moveItems(restoreChanges, 'reverse');
+      const generated = new Set(record.generated_folders || []);
+      const folders = [...new Set((await this.folders()).filter(path => !generated.has(path)).concat(record.snapshot.folders || []))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
+      await writeFile(this.foldersFile, json(folders));
+      const views = await this.savedViews();
+      for (const saved of record.snapshot.views || []) {
+        const view = views.find(value => value.id === saved.id);
+        if (view) view.category = saved.category;
+      }
+      await writeFile(this.savedViewsFile, json(views));
+      for (const path of [...folders, ...record.snapshot.items.map(item => item.category)]) await mkdir(join(this.library, ...path.split('/')), { recursive: true });
+      for (const path of [...generated].sort((a, b) => b.split('/').length - a.split('/').length)) await rmdir(join(this.library, ...path.split('/'))).catch(() => {});
+      record.status = 'undone';
+      record.undone_at = new Date().toISOString();
+      await this.writeRestructureHistory(history);
+      return record;
+    }
     const items = new Map((await this.items()).map(item => [item.id, item]));
     for (const change of record.changes) {
       const item = items.get(change.item_id);
@@ -604,7 +689,7 @@ export class Library {
       const [categories, tags] = await Promise.all([this.categories(), this.tags()]);
       const analysis = await this.analyze(extracted, { categories, tags });
       const decision = await this.decide(extracted, analysis, { categories });
-      const category = String(decision.category || analysis.category || '未分类').split('/').map(safePart).filter(Boolean).slice(0, 2).join('/') || '未分类';
+      const category = String(decision.category || analysis.category || '未分类').split('/').map(safePart).filter(Boolean).slice(0, 32).join('/') || '未分类';
       const title = safePart(analysis.title || extracted.title || basename(path, extname(path))) || 'Untitled';
       const sourceDate = publicationDate(extracted.publishedAt?.slice(0, 10));
       const evidence = String(analysis.publication_evidence || '').trim();
@@ -681,7 +766,7 @@ export class Library {
     }
     if ('title' in changes) item.title = safePart(changes.title) || 'Untitled';
     if ('summary' in changes) item.summary = String(changes.summary).trim();
-    if ('category' in changes) item.category = String(changes.category).split('/').map(safePart).filter(Boolean).slice(0, 2).join('/') || '未分类';
+    if ('category' in changes) item.category = this.normalizeCategory(changes.category || '未分类');
     if ('tags' in changes) {
       if (!Array.isArray(changes.tags)) throw new Error('tags must be an array');
       item.tags = [...new Set(changes.tags.map(safePart).filter(Boolean))].slice(0, 8);
@@ -820,7 +905,7 @@ export class Library {
     const item = (await this.items()).find(value => value.id === id);
     if (!item || item.status !== 'review') return null;
     if (!item.summary?.trim()) throw new Error('Add a summary before approving');
-    const category = String(item.category || '未分类').split('/').map(safePart).filter(Boolean).slice(0, 2);
+    const category = String(item.category || '未分类').split('/').map(safePart).filter(Boolean);
     const folder = join(this.library, ...category);
     await mkdir(folder, { recursive: true });
     let stem = `${(item.published_at || item.received_at).slice(0, 7)}-${safePart(item.title) || 'Untitled'}`;

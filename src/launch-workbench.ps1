@@ -24,7 +24,7 @@ $port = 3000
 if (Test-LocalPort $port) {
   try {
     $health = Invoke-RestMethod -Uri "http://127.0.0.1:$port/health" -TimeoutSec 2
-    if ([int]$health.api_version -ge 8) {
+    if ([int]$health.api_version -ge 9) {
       Write-Host "InfoBox is already running at http://127.0.0.1:$port"
       Open-Workbench $port
       exit 0

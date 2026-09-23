@@ -78,7 +78,7 @@ export function createApi(library) {
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://localhost');
-      if (request.method === 'GET' && url.pathname === '/health') return send(response, 200, { status: 'ok', api_version: 8 });
+      if (request.method === 'GET' && url.pathname === '/health') return send(response, 200, { status: 'ok', api_version: 9 });
       if (request.method === 'GET' && url.pathname === '/api/library/tree') return send(response, 200, await library.tree());
       if (request.method === 'POST' && url.pathname === '/api/library/folders') {
         const payload = JSON.parse((await bodyBuffer(request)).toString('utf8'));
@@ -96,6 +96,10 @@ export function createApi(library) {
       if (request.method === 'POST' && url.pathname === '/api/restructure/apply') {
         const payload = JSON.parse((await bodyBuffer(request)).toString('utf8'));
         return send(response, 201, await library.applyRestructure(payload));
+      }
+      if (request.method === 'POST' && url.pathname === '/api/restructure/run') {
+        const payload = JSON.parse((await bodyBuffer(request)).toString('utf8'));
+        return send(response, 201, await library.runRestructure(payload));
       }
       const restructureUndoMatch = url.pathname.match(/^\/api\/restructure\/([0-9a-f-]{36})\/undo$/);
       if (request.method === 'POST' && restructureUndoMatch) {
@@ -222,7 +226,7 @@ export function createApi(library) {
       }
       send(response, 404, { error: 'Route not found' });
     } catch (error) {
-      send(response, error instanceof SyntaxError || error instanceof TypeError || /^Only |^Supported |^File |^Upload |^quality_score|^tags |^published_at|^corrected_text|^favorite |^reading_|^last_opened|^Add |^Unsupported |^Item update|^Move or |^Correction |^Folder |^Parent folder|^Invalid note|^Invalid inbox|^Cannot delete|^Note content|^Saved view|^Relation |^Related item|^Category |^Restructure |^Target folder|^This move|^This structure/.test(error.message) ? 400 : 500, { error: error.message });
+      send(response, error instanceof SyntaxError || error instanceof TypeError || /^Only |^Supported |^File |^Upload |^quality_score|^tags |^published_at|^corrected_text|^favorite |^reading_|^last_opened|^Add |^Unsupported |^Item update|^Move or |^Correction |^Folder |^Parent folder|^Invalid note|^Invalid inbox|^Cannot delete|^Note content|^Saved view|^Relation |^Related item|^Category |^Restructure |^Select at least|^Selected folders|^Target folder|^This move|^This structure/.test(error.message) ? 400 : 500, { error: error.message });
     }
   });
 }
