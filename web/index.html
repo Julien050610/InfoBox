@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>InfoBox · 本地知识工作台</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=32">
+  <link rel="stylesheet" href="/styles.css?v=33">
 </head>
 <body>
   <div class="paper-grain" aria-hidden="true"></div>
@@ -106,7 +106,7 @@
           <fieldset><legend>文件类型</legend><div class="choice-row" id="kindFilters"></div></fieldset>
           <fieldset><legend>阅读状态</legend><div class="choice-row" id="readingFilters"></div></fieldset>
           <fieldset><legend>标签 <select id="tagMode" aria-label="标签匹配方式"><option value="and">全部匹配</option><option value="or">任一匹配</option></select></legend><div class="tag-filter-list" id="tagFilters"></div></fieldset>
-          <fieldset><legend>其他条件</legend><div class="filter-fields"><label>资料状态<select id="statusFilter"><option value="">全部</option><option value="ready">已入库</option><option value="review">待检查</option></select></label><label>收藏<select id="favoriteFilter"><option value="any">全部</option><option value="yes">仅收藏</option><option value="no">未收藏</option></select></label><label>最低评分<select id="scoreFilter"><option value="0">不限</option><option value="1">1 星</option><option value="2">2 星</option><option value="3">3 星</option><option value="4">4 星</option><option value="5">5 星</option></select></label><label>排序<select id="sortFilter"><option value="received_desc">最近收件</option><option value="published_desc">最近发表</option><option value="score_desc">评分最高</option><option value="title_asc">标题顺序</option></select></label></div></fieldset>
+          <fieldset><legend>其他条件</legend><div class="filter-fields"><label>筛选文件夹<select id="folderFilter" aria-label="筛选文件夹"></select></label><label>资料状态<select id="statusFilter"><option value="">全部</option><option value="ready">已入库</option><option value="review">待检查</option></select></label><label>收藏<select id="favoriteFilter"><option value="any">全部</option><option value="yes">仅收藏</option><option value="no">未收藏</option></select></label><label>最低评分<select id="scoreFilter"><option value="0">不限</option><option value="1">1 星</option><option value="2">2 星</option><option value="3">3 星</option><option value="4">4 星</option><option value="5">5 星</option></select></label><label>排序<select id="sortFilter"><option value="received_desc">最近收件</option><option value="published_desc">最近发表</option><option value="score_desc">评分最高</option><option value="title_asc">标题顺序</option></select></label></div></fieldset>
           <fieldset class="date-filter"><legend>日期范围</legend><div class="filter-fields"><label>发表自<input id="publishedFrom" type="date"></label><label>发表至<input id="publishedTo" type="date"></label><label>收件自<input id="receivedFrom" type="date"></label><label>收件至<input id="receivedTo" type="date"></label></div></fieldset>
         </div>
         <div class="filter-actions"><button class="secondary-action" id="clearFilters">清除筛选</button><button class="secondary-action" id="saveViewButton">保存当前视图</button><button class="primary-action" id="applyFilters">查看结果</button></div>
@@ -191,6 +191,6 @@
   <svg class="note-lines" id="noteLines" aria-hidden="true"></svg>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <div class="move-popover" id="movePopover" hidden></div>
-  <script type="module" src="/app.js?v=34"></script>
+  <script type="module" src="/app.js?v=35"></script>
 </body>
 </html>

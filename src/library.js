@@ -283,7 +283,7 @@ export class Library {
     return {
       created_at: new Date().toISOString(), folders, categories,
       items: items.filter(item => item.status === 'ready').map(item => ({ item_id: item.id, category: item.category })),
-      views: views.map(view => ({ id: view.id, category: view.category || '' })),
+      views: views.map(view => ({ id: view.id, scope: view.scope || 'all', category: view.category || '', filters: JSON.parse(JSON.stringify(view.filters || {})) })),
     };
   }
 
@@ -304,6 +304,26 @@ export class Library {
       });
     }
     return changes;
+  }
+
+  restructureAssignments(items, proposal) {
+    const byId = new Map(items.map(item => [item.id, item]));
+    const decisions = new Map();
+    for (const candidate of proposal.changes || []) {
+      const id = String(candidate.item_id || '');
+      if (!byId.has(id)) throw new Error('Restructure plan contains an unknown item');
+      if (decisions.has(id)) throw new Error('Restructure plan contains a duplicate item');
+      decisions.set(id, candidate);
+    }
+    if (decisions.size !== items.length) throw new Error('Restructure plan did not classify every selected item');
+    return items.map(item => {
+      const candidate = decisions.get(item.id);
+      return {
+        item_id: item.id, title: item.title, from: item.category, to: this.normalizeCategory(candidate.category),
+        reason: String(candidate.reason || '').trim().slice(0, 500),
+        confidence: Math.max(0, Math.min(1, Number(candidate.confidence) || 0)),
+      };
+    });
   }
 
   generatedFolderPaths(changes, snapshot) {
@@ -393,23 +413,49 @@ export class Library {
     const scopes = normalized.filter(scope => !normalized.some(parent => parent !== scope && (!parent || scope.startsWith(`${parent}/`))));
     const items = (await this.items()).filter(item => item.status === 'ready' && scopes.some(scope => !scope || item.category === scope || item.category.startsWith(`${scope}/`)));
     if (!items.length) throw new Error('Selected folders contain no items');
-    const proposal = await this.restructure(items, { categories, scopes });
-    const changes = this.proposalChanges(items, proposal);
-    if (!changes.length) return { status: 'unchanged', scopes, changes: [], rationale: String(proposal.rationale || '').slice(0, 3000) };
+    const withinScopes = path => scopes.some(scope => !scope || path === scope || path.startsWith(`${scope}/`));
+    const discardedFolders = categories.filter(withinScopes);
+    const planningCategories = categories.filter(path => !withinScopes(path));
+    const assignments = [];
+    const rationales = [];
+    for (let index = 0; index < items.length; index += 100) {
+      const batch = items.slice(index, index + 100);
+      const proposal = await this.restructure(batch, { categories: planningCategories, scopes, complete: true });
+      const batchAssignments = this.restructureAssignments(batch, proposal);
+      assignments.push(...batchAssignments);
+      rationales.push(String(proposal.rationale || '').trim());
+      for (const assignment of batchAssignments) if (!planningCategories.includes(assignment.to)) planningCategories.push(assignment.to);
+    }
+    const changes = assignments.filter(change => change.from !== change.to);
     const snapshot = await this.structureSnapshot();
+    const foldersBefore = await this.folders();
+    const foldersAfter = foldersBefore.filter(path => !withinScopes(path));
+    const views = await this.savedViews();
+    const viewsBefore = JSON.parse(JSON.stringify(views));
+    for (const view of views) {
+      if (view.category && withinScopes(view.category)) { view.scope = 'all'; view.category = ''; }
+      if (view.filters?.folder && withinScopes(view.filters.folder)) view.filters.folder = '';
+    }
     await this.moveItems(changes);
     const record = {
       id: randomUUID(), type: 'agent', status: 'applied', scopes,
-      rationale: String(proposal.rationale || '').slice(0, 3000), changes, snapshot,
+      rationale: rationales.filter(Boolean).join('\n').slice(0, 3000), changes, snapshot,
+      item_count: assignments.length, removed_folders: discardedFolders,
       generated_folders: this.generatedFolderPaths(changes, snapshot),
       created_at: new Date().toISOString(), undone_at: null,
     };
     const history = await readJsonArray(this.restructureHistoryFile);
     history.push(record);
     try {
+      await writeFile(this.foldersFile, json(foldersAfter));
+      await writeFile(this.savedViewsFile, json(views));
+      for (const path of [...discardedFolders].sort((a, b) => b.split('/').length - a.split('/').length)) await rmdir(join(this.library, ...path.split('/'))).catch(() => {});
       await this.writeRestructureHistory(history);
     } catch (error) {
       await this.moveItems([...changes].reverse(), 'reverse').catch(() => {});
+      await writeFile(this.foldersFile, json(foldersBefore)).catch(() => {});
+      await writeFile(this.savedViewsFile, json(viewsBefore)).catch(() => {});
+      for (const path of [...snapshot.folders, ...snapshot.items.map(item => item.category)]) await mkdir(join(this.library, ...path.split('/')), { recursive: true }).catch(() => {});
       throw error;
     }
     return record;
@@ -496,7 +542,11 @@ export class Library {
       const views = await this.savedViews();
       for (const saved of record.snapshot.views || []) {
         const view = views.find(value => value.id === saved.id);
-        if (view) view.category = saved.category;
+        if (view) {
+          view.category = saved.category;
+          if (saved.scope) view.scope = saved.scope;
+          if (saved.filters) view.filters = JSON.parse(JSON.stringify(saved.filters));
+        }
       }
       await writeFile(this.savedViewsFile, json(views));
       for (const path of [...folders, ...record.snapshot.items.map(item => item.category)]) await mkdir(join(this.library, ...path.split('/')), { recursive: true });

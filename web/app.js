@@ -15,7 +15,7 @@ const state = {
   searchMatches: new Map(),
   searchRequest: 0,
   filters: {
-    kinds: [], tags: [], tagMode: 'and', status: '', readingStatuses: [], favorite: 'any',
+    folder: '', kinds: [], tags: [], tagMode: 'and', status: '', readingStatuses: [], favorite: 'any',
     scoreMin: 0, publishedFrom: '', publishedTo: '', receivedFrom: '', receivedTo: '', sort: 'received_desc',
   },
   savedViews: [],
@@ -226,6 +226,7 @@ function filteredItems() {
   const query = state.query.trim();
   const filters = state.filters;
   const results = scopedItems().filter(item => {
+    if (filters.folder && item.category !== filters.folder && !item.category?.startsWith(`${filters.folder}/`)) return false;
     if (query && !state.searchMatches.has(item.id)) return false;
     if (filters.kinds.length && !filters.kinds.includes(item.kind)) return false;
     if (filters.status && item.status !== filters.status) return false;
@@ -254,7 +255,7 @@ function filteredItems() {
 
 function activeFilterCount() {
   const f = state.filters;
-  return f.kinds.length + f.tags.length + f.readingStatuses.length + Number(Boolean(f.status)) + Number(f.favorite !== 'any') + Number(f.scoreMin > 0) + Number(Boolean(f.publishedFrom)) + Number(Boolean(f.publishedTo)) + Number(Boolean(f.receivedFrom)) + Number(Boolean(f.receivedTo)) + Number(f.sort !== 'received_desc');
+  return Number(Boolean(f.folder)) + f.kinds.length + f.tags.length + f.readingStatuses.length + Number(Boolean(f.status)) + Number(f.favorite !== 'any') + Number(f.scoreMin > 0) + Number(Boolean(f.publishedFrom)) + Number(Boolean(f.publishedTo)) + Number(Boolean(f.receivedFrom)) + Number(Boolean(f.receivedTo)) + Number(f.sort !== 'received_desc');
 }
 
 function folderCreatorHtml(parent, depth) {
@@ -349,6 +350,12 @@ function renderFilterPanel() {
   const kinds = [...new Set(state.items.map(item => item.kind))].sort();
   const tags = [...new Set(state.items.flatMap(item => item.tags || []))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
   const chip = (group, value, label, checked) => `<label class="filter-choice"><input type="checkbox" data-filter-group="${group}" value="${escapeHtml(value)}" ${checked ? 'checked' : ''}><span>${escapeHtml(label)}</span></label>`;
+  const folders = [];
+  const collectFolders = nodes => nodes.forEach(node => { folders.push(node.path); collectFolders(node.children || []); });
+  collectFolders(state.tree?.children || []);
+  const selectedFolder = state.filters.folder || (state.scope === 'category' ? state.category : '');
+  document.querySelector('#folderFilter').innerHTML = ['<option value="">Library</option>', ...folders.map(path => `<option value="${escapeHtml(path)}">Library / ${escapeHtml(path)}</option>`)].join('');
+  document.querySelector('#folderFilter').value = selectedFolder;
   document.querySelector('#kindFilters').innerHTML = kinds.map(kind => chip('kinds', kind, kindNames[kind] || kind, state.filters.kinds.includes(kind))).join('') || '<span class="summary">暂无类型</span>';
   document.querySelector('#readingFilters').innerHTML = Object.entries(readingNames).map(([value, label]) => chip('readingStatuses', value, label, state.filters.readingStatuses.includes(value))).join('');
   document.querySelector('#tagFilters').innerHTML = tags.map(tag => chip('tags', tag, tag, state.filters.tags.includes(tag))).join('') || '<span class="summary">暂无标签</span>';
@@ -366,7 +373,7 @@ function renderFilterPanel() {
 function readFilterPanel() {
   const checked = group => [...elements.filterPanel.querySelectorAll(`[data-filter-group="${group}"]:checked`)].map(input => input.value);
   state.filters = {
-    kinds: checked('kinds'), tags: checked('tags'), tagMode: document.querySelector('#tagMode').value,
+    folder: document.querySelector('#folderFilter').value, kinds: checked('kinds'), tags: checked('tags'), tagMode: document.querySelector('#tagMode').value,
     status: document.querySelector('#statusFilter').value, readingStatuses: checked('readingStatuses'),
     favorite: document.querySelector('#favoriteFilter').value, scoreMin: Number(document.querySelector('#scoreFilter').value),
     publishedFrom: document.querySelector('#publishedFrom').value, publishedTo: document.querySelector('#publishedTo').value,
@@ -376,7 +383,7 @@ function readFilterPanel() {
 }
 
 function resetFilters() {
-  state.filters = { kinds: [], tags: [], tagMode: 'and', status: '', readingStatuses: [], favorite: 'any', scoreMin: 0, publishedFrom: '', publishedTo: '', receivedFrom: '', receivedTo: '', sort: 'received_desc' };
+  state.filters = { folder: '', kinds: [], tags: [], tagMode: 'and', status: '', readingStatuses: [], favorite: 'any', scoreMin: 0, publishedFrom: '', publishedTo: '', receivedFrom: '', receivedTo: '', sort: 'received_desc' };
   renderFilterPanel();
   render();
   pushNavigation();
@@ -395,7 +402,7 @@ function renderRollbackHistory() {
   const records = state.restructureHistory.slice(0, 30);
   elements.structureHistory.innerHTML = records.length ? records.map(record => {
     const folderChange = record.folder_change;
-    const title = folderChange ? `${folderChange.source} → ${folderChange.target}` : `${record.changes?.length || 0} 项资料重构`;
+    const title = folderChange ? `${folderChange.source} → ${folderChange.target}` : `${record.item_count ?? record.changes?.length ?? 0} 项资料重构`;
     const date = new Date(record.created_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
     return `<article class="rollback-row ${record.status === 'undone' ? 'is-undone' : ''}"><span class="history-mark">${folderChange ? '夹' : 'AI'}</span><div><strong>${escapeHtml(title)}</strong><p>${escapeHtml(record.rationale || '')}</p><small>${date}${record.status === 'undone' ? ' · 已恢复' : ''}</small></div>${record.status === 'applied' ? `<button type="button" data-undo-restructure="${record.id}">恢复</button>` : '<span class="history-status">已恢复</span>'}</article>`;
   }).join('') : '<div class="structure-empty">还没有可回退的结构快照</div>';
@@ -427,7 +434,7 @@ async function runSelectedRestructure() {
     state.restructureSelecting = false;
     state.selectedStructureFolders.clear();
     await load({ quiet: true });
-    showToast(result.status === 'unchanged' ? 'Agent 建议保留当前结构' : `已重构 ${result.changes.length} 项资料，快照已保存`);
+    showToast(`已重新分类 ${result.item_count ?? result.changes.length} 项资料，快照已保存`);
   } catch (error) { showToast(error.message); }
   finally { state.structureBusy = false; renderNavigation(); }
 }
@@ -469,7 +476,7 @@ async function saveCurrentView() {
   const name = window.prompt('给这个筛选视图命名：');
   if (!name?.trim()) return;
   try {
-    const view = await api('/api/views', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: name.trim(), query: state.query, scope: state.scope, category: state.category, filters: state.filters }) });
+    const view = await api('/api/views', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: name.trim(), query: state.query, scope: state.filters.folder ? 'all' : state.scope, category: state.filters.folder ? '' : state.category, filters: state.filters }) });
     state.savedViews.push(view);
     renderNavigation();
     showToast('筛选视图已保存');
@@ -556,14 +563,16 @@ function renderList() {
     ? state.items.filter(item => item.status === 'ready' && item.category === currentPath)
     : filteredItems();
   const title = state.scope === 'review' ? '待检查' : state.scope === 'recent' ? '最近添加' : state.scope === 'favorites' ? '收藏' : state.scope === 'unread' ? '未读' : state.scope === 'category' ? state.category.split('/').at(-1) : 'Library';
-  elements.collectionTitle.textContent = state.graphMode ? '知识图谱' : title;
-  elements.collectionPath.textContent = state.graphMode ? 'KNOWLEDGE HOME' : currentPath ? `LIBRARY / ${currentPath.toUpperCase()}` : 'KNOWLEDGE LIBRARY';
+  const filtering = Boolean(state.query.trim() || activeFilterCount());
+  const filterFolder = state.filters.folder || currentPath || 'Library';
+  elements.collectionTitle.textContent = state.graphMode ? '知识图谱' : filtering ? '筛选结果' : title;
+  elements.collectionPath.textContent = state.graphMode ? 'KNOWLEDGE HOME' : filtering ? `筛选文件夹 · ${filterFolder === 'Library' ? 'Library' : `Library / ${filterFolder}`}` : currentPath ? `LIBRARY / ${currentPath.toUpperCase()}` : 'KNOWLEDGE LIBRARY';
   elements.resultCount.textContent = browsingDirectory ? `${folders.length} 个文件夹 · ${items.length} 个文件` : `${items.length} 项资料`;
   elements.list.closest('.catalog')?.querySelector('.catalog-hint')?.replaceChildren(document.createTextNode(browsingDirectory ? '进入文件夹，或选择文件打开预览' : '选择一项即可在下方阅读'));
   if (!items.some(item => item.id === state.selectedId)) state.selectedId = null;
   elements.contentColumn.classList.toggle('is-folder-browser', browsingDirectory && !state.selectedId && !state.graphMode);
   const rows = [...folders.map(folderRowHtml), ...items.map(itemRowHtml)];
-  elements.list.innerHTML = rows.length ? rows.join('') : '<div class="empty-list">当前文件夹为空，可从左侧新建子文件夹</div>';
+  elements.list.innerHTML = rows.length ? rows.join('') : `<div class="empty-list">${filtering ? '当前筛选条件下没有资料' : '当前文件夹为空，可从左侧新建子文件夹'}</div>`;
 }
 
 function graphData() {
@@ -769,7 +778,7 @@ function openGraphHome({ record = true } = {}) {
   state.graphFocusId = 'root';
   state.query = '';
   state.searchMatches = new Map();
-  state.filters = { kinds: [], tags: [], tagMode: 'and', status: '', readingStatuses: [], favorite: 'any', scoreMin: 0, publishedFrom: '', publishedTo: '', receivedFrom: '', receivedTo: '', sort: 'received_desc' };
+  state.filters = { folder: '', kinds: [], tags: [], tagMode: 'and', status: '', readingStatuses: [], favorite: 'any', scoreMin: 0, publishedFrom: '', publishedTo: '', receivedFrom: '', receivedTo: '', sort: 'received_desc' };
   elements.search.value = '';
   setGraphMode(true);
   render();
@@ -806,7 +815,7 @@ function openGraphFolder(path = '') {
   state.editingItemId = null;
   state.query = '';
   state.searchMatches = new Map();
-  state.filters = { kinds: [], tags: [], tagMode: 'and', status: '', readingStatuses: [], favorite: 'any', scoreMin: 0, publishedFrom: '', publishedTo: '', receivedFrom: '', receivedTo: '', sort: 'received_desc' };
+  state.filters = { folder: '', kinds: [], tags: [], tagMode: 'and', status: '', readingStatuses: [], favorite: 'any', scoreMin: 0, publishedFrom: '', publishedTo: '', receivedFrom: '', receivedTo: '', sort: 'received_desc' };
   elements.search.value = '';
   setGraphMode(false);
   render();
@@ -2021,7 +2030,7 @@ elements.backButton.addEventListener('click', goBack);
 elements.forwardButton.addEventListener('click', goForward);
 elements.filterButton.addEventListener('click', () => toggleFilterPanel());
 document.querySelector('#filterClose').addEventListener('click', () => toggleFilterPanel(false));
-document.querySelector('#applyFilters').addEventListener('click', () => { readFilterPanel(); toggleFilterPanel(false); render(); if (state.graphMode) renderGraph(); pushNavigation(); });
+document.querySelector('#applyFilters').addEventListener('click', () => { readFilterPanel(); if (state.filters.folder) { state.scope = 'all'; state.category = ''; } toggleFilterPanel(false); render(); if (state.graphMode) renderGraph(); pushNavigation(); });
 document.querySelector('#clearFilters').addEventListener('click', resetFilters);
 document.querySelector('#saveViewButton').addEventListener('click', () => { readFilterPanel(); saveCurrentView(); });
 elements.graphButton.addEventListener('click', () => {

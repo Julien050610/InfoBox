@@ -431,11 +431,15 @@ test('supports deep folders and snapshot rollback without moving later items', a
   const root = await mkdtemp(join(tmpdir(), 'infobox-test-'));
   const originalId = '77777777-7777-4777-8777-777777777777';
   const outsideId = '88888888-8888-4888-8888-888888888888';
-  const library = new Library({ root, restructure: async items => ({
-    rationale: '补全稳定的学科层级。',
-    changes: items.map(item => ({ item_id: item.id, category: 'Computer Science/AI/强化学习/策略优化', reason: '补充学科上下文。', confidence: 0.95 })),
-    provider: 'test', model: 'test-model',
-  }) });
+  let restructureOptions;
+  const library = new Library({ root, restructure: async (items, options) => {
+    restructureOptions = options;
+    return {
+      rationale: '补全稳定的学科层级。',
+      changes: items.map(item => ({ item_id: item.id, category: 'Computer Science/AI/强化学习/策略优化', reason: '补充学科上下文。', confidence: 0.95 })),
+      provider: 'test', model: 'test-model',
+    };
+  } });
   await library.init({ watchInbox: false });
   const writeItem = async (id, title, category) => {
     const folder = join(root, 'library', ...category.split('/'));
@@ -458,13 +462,22 @@ test('supports deep folders and snapshot rollback without moving later items', a
     await library.addFolder({ name: '强化学习', parent: 'Computer Science/AI' });
     const deep = await library.addFolder({ name: '实验', parent: 'Computer Science/AI/强化学习' });
     assert.equal(deep.path, 'Computer Science/AI/强化学习/实验');
+    await library.addFolder({ name: '旧空目录', parent: '强化学习' });
+    const savedView = await library.addSavedView({ name: '旧强化学习视图', scope: 'all', filters: { folder: '强化学习', scoreMin: 3 } });
 
     const run = await fetch(`${base}/api/restructure/run`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ scopes: ['强化学习'] }) });
     assert.equal(run.status, 201);
     const record = await run.json();
+    assert.equal(record.item_count, 1);
     assert.equal(record.snapshot.items.length, 2);
+    assert.equal(restructureOptions.complete, true);
+    assert.equal(restructureOptions.categories.includes('强化学习'), false);
+    assert.equal(restructureOptions.categories.includes('强化学习/旧空目录'), false);
     assert.equal((await library.items()).find(item => item.id === originalId).category, 'Computer Science/AI/强化学习/策略优化');
+    assert.equal((await library.items()).find(item => item.id === originalId).summary, '摘要');
     assert.equal((await library.items()).find(item => item.id === outsideId).category, 'Biology');
+    assert.equal((await library.folders()).includes('强化学习/旧空目录'), false);
+    assert.equal((await library.savedViews()).find(view => view.id === savedView.id).filters.folder, '');
 
     const laterId = '99999999-9999-4999-8999-999999999999';
     await writeItem(laterId, '后加入资料', 'Computer Science/AI/强化学习/策略优化');
@@ -473,6 +486,8 @@ test('supports deep folders and snapshot rollback without moving later items', a
     const restored = await library.items();
     assert.equal(restored.find(item => item.id === originalId).category, '强化学习');
     assert.equal(restored.find(item => item.id === laterId).category, 'Computer Science/AI/强化学习/策略优化');
+    assert.equal((await library.folders()).includes('强化学习/旧空目录'), true);
+    assert.equal((await library.savedViews()).find(view => view.id === savedView.id).filters.folder, '强化学习');
     assert.equal((await library.restructureHistory())[0].status, 'undone');
   } finally {
     library.close();
