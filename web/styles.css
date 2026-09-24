@@ -263,6 +263,13 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .tree-add-child { position: absolute; z-index: 2; top: 50%; right: 6px; width: 23px; height: 23px; display: grid; place-items: center; padding: 0; color: #f0d29a; background: rgba(212,177,123,.12); border: 1px solid rgba(212,177,123,.24); border-radius: 4px; cursor: pointer; font-size: 14px; line-height: 1; opacity: 0; transform: translateY(-50%) scale(.88); pointer-events: none; transition: opacity .14s ease, transform .14s ease, background .14s ease; }
 .tree-node-shell:hover .tree-add-child, .tree-node-shell:focus-within .tree-add-child { opacity: 1; transform: translateY(-50%) scale(1); pointer-events: auto; }
 .tree-add-child:hover, .tree-add-child:focus-visible { color: var(--forest); background: #d4b17b; border-color: #d4b17b; outline: 0; }
+.library-create-menu { display: grid; gap: 4px; margin: 3px 7px 8px 22px; padding: 5px; background: #17372f; border: 1px solid rgba(212,177,123,.35); border-radius: 6px; box-shadow: 0 9px 24px rgba(2,20,15,.22); }
+.library-create-menu button { min-height: 43px; display: grid; grid-template-columns: 22px minmax(0,1fr); align-items: center; gap: 7px; padding: 6px 8px; color: rgba(255,255,255,.7); background: transparent; border: 0; border-radius: 4px; cursor: pointer; text-align: left; }
+.library-create-menu button:hover { color: #fff; background: rgba(212,177,123,.13); }
+.library-create-menu button > span:first-child { color: #d4b17b; font-size: 13px; text-align: center; }
+.library-create-menu strong, .library-create-menu small { display: block; }
+.library-create-menu strong { font-size: 9px; }
+.library-create-menu small { margin-top: 3px; color: rgba(255,255,255,.38); font-size: 8px; }
 .tree-root-node { min-height: 38px; color: #f3dfb7; background: rgba(212,177,123,.07); border: 1px solid rgba(212,177,123,.18); font-weight: 700; }
 .tree-root-node:hover { background: rgba(212,177,123,.12); }
 .tree-root-node.is-active { background: rgba(212,177,123,.17); box-shadow: inset 3px 0 0 #d4b17b; }
@@ -665,6 +672,20 @@ kbd { padding: 3px 6px; color: #7a817c; background: var(--surface); border: 1px 
 .empty-list { height: 100%; display: grid; place-items: center; color: var(--ink-soft); font: 12px/1.5 var(--serif); }
 .toast { position: fixed; right: 22px; bottom: 22px; z-index: 20; padding: 11px 15px; color: #fff; background: var(--forest); border-radius: 6px; box-shadow: var(--shadow); opacity: 0; transform: translateY(10px); pointer-events: none; font-size: 11px; transition: .2s ease; }
 .toast.is-visible { opacity: 1; transform: translateY(0); }
+
+.dialog-scrim { position: fixed; z-index: 100; inset: 0; display: grid; place-items: center; padding: 24px; background: rgba(16,31,26,.48); backdrop-filter: blur(4px); }
+.url-import-dialog { width: min(560px, 100%); padding: 22px; color: var(--ink); background: #faf8f2; border: 1px solid var(--line-strong); border-radius: 12px; box-shadow: 0 30px 90px rgba(12,27,22,.32); }
+.url-import-dialog header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.url-import-dialog header .eyebrow { color: var(--forest); }
+.url-import-dialog h3 { margin: 5px 0 0; font: 600 23px/1 var(--serif); }
+.url-import-dialog header button { width: 31px; height: 31px; color: var(--ink-soft); background: transparent; border: 1px solid var(--line); border-radius: 5px; cursor: pointer; font-size: 18px; }
+.url-import-dialog > p { margin: 16px 0; color: var(--ink-soft); font-size: 10px; line-height: 1.65; }
+.url-import-dialog label { display: block; margin-bottom: 7px; color: var(--forest); font-size: 9px; font-weight: 700; }
+.url-import-dialog textarea { width: 100%; min-height: 172px; padding: 11px 12px; color: var(--ink); background: #fffdf8; border: 1px solid var(--line-strong); border-radius: 7px; outline: 0; resize: vertical; font: 10px/1.65 var(--sans); }
+.url-import-dialog textarea:focus { border-color: var(--moss); box-shadow: 0 0 0 3px rgba(132,155,118,.12); }
+.url-import-feedback { min-height: 18px; padding-top: 6px; color: var(--ink-soft); font-size: 8px; }
+.url-import-feedback.is-error { color: var(--danger); }
+.url-import-dialog footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
 
 @media (max-width: 1180px) {
   body { --sidebar-width: 215px; }

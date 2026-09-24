@@ -151,7 +151,7 @@ test('uploads, files, deduplicates, and updates manual quality score', async () 
     const workbench = await fetch(base);
     assert.match(await workbench.text(), /InfoBox/);
     const health = await (await fetch(`${base}/health`)).json();
-    assert.equal(health.api_version, 9);
+    assert.equal(health.api_version, 10);
     const pdfRuntime = await fetch(`${base}/vendor/pdf.mjs`);
     assert.equal(pdfRuntime.status, 200);
     assert.match(await pdfRuntime.text(), /getDocument/);
@@ -220,6 +220,66 @@ test('keeps uploaded files pending until inbox classification is started manuall
     assert.equal((await waitForJob(base, batch.jobs[0].id)).status, 'ready');
     assert.equal((await (await fetch(`${base}/api/inbox`)).json()).length, 0);
     assert.equal((await library.items()).length, 1);
+  } finally {
+    library.close();
+    await new Promise(resolve => server.close(resolve));
+    if (!root.startsWith(join(tmpdir(), 'infobox-test-'))) throw new Error('Unsafe test cleanup path');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('imports multiple URLs into the inbox without starting classification', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'infobox-test-'));
+  const library = new Library({ root });
+  await library.init({ watchInbox: false });
+  const server = createApi(library);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const response = await fetch(`${base}/api/inbox/urls?defer=1`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ urls: ['https://example.org/article', 'https://youtu.be/demo', 'https://example.org/article'] }),
+    });
+    assert.equal(response.status, 202);
+    const result = await response.json();
+    assert.equal(result.status, 'pending');
+    assert.equal(result.files.length, 2);
+    assert.equal((await library.items()).length, 0);
+    const pending = await (await fetch(`${base}/api/inbox`)).json();
+    assert.equal(pending.length, 2);
+    assert.ok(pending.every(file => file.extension === '.url' && file.processing === false));
+
+    const invalid = await fetch(`${base}/api/inbox/urls?defer=1`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ urls: ['https://example.org/valid', 'ftp://example.org/invalid'] }),
+    });
+    assert.equal(invalid.status, 400);
+    assert.equal((await (await fetch(`${base}/api/inbox`)).json()).length, 2);
+  } finally {
+    library.close();
+    await new Promise(resolve => server.close(resolve));
+    if (!root.startsWith(join(tmpdir(), 'infobox-test-'))) throw new Error('Unsafe test cleanup path');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('routes content with no reliable category to review', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'infobox-test-'));
+  const library = new Library({ root,
+    analyze: async () => ({ title: 'Unclear source', summary: '内容存在，但无法判断分类。', category: '', tags: ['待判断'], published_at: null, needs_review: false, review_reason: '' }),
+    decide: async () => ({ category: '', tags: ['待判断'], needs_review: false, review_reason: '', provider: 'test' }),
+  });
+  await library.init({ watchInbox: false });
+  const server = createApi(library);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const response = await fetch(`${base}/api/inbox/files?filename=unclear.png`, { method: 'POST', body: Buffer.from('unclear') });
+    const job = await response.json();
+    assert.equal((await waitForJob(base, job.id)).status, 'review');
+    const item = (await library.items()).find(value => value.id === job.id);
+    assert.equal(item.category, '未分类');
+    assert.equal(item.review_reason, '无法可靠判断资料分类');
   } finally {
     library.close();
     await new Promise(resolve => server.close(resolve));

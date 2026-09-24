@@ -25,6 +25,8 @@ const state = {
   selectedStructureFolders: new Set(),
   structureBusy: false,
   creatingFolderParent: null,
+  libraryCreateMenuOpen: false,
+  importingUrls: false,
   moveEntity: null,
   graphMode: true,
   graphFocusId: 'root',
@@ -88,6 +90,10 @@ const elements = {
   folderFilterButton: document.querySelector('#folderFilterButton'),
   folderFilterSelection: document.querySelector('#folderFilterSelection'),
   folderFilterPopover: document.querySelector('#folderFilterPopover'),
+  urlImportDialog: document.querySelector('#urlImportDialog'),
+  urlImportInput: document.querySelector('#urlImportInput'),
+  urlImportFeedback: document.querySelector('#urlImportFeedback'),
+  urlImportSubmit: document.querySelector('#urlImportSubmit'),
   structureHistory: document.querySelector('#structureHistory'),
   movePopover: document.querySelector('#movePopover'),
   graphButton: document.querySelector('#graphButton'),
@@ -269,7 +275,16 @@ function folderCreatorHtml(parent, depth) {
 
 function folderAddButton(path, name) {
   if (state.restructureSelecting) return '';
+  if (!path) return `<button class="tree-add-child" type="button" data-library-create-toggle aria-expanded="${state.libraryCreateMenuOpen}" aria-label="在 Library 中新建内容" title="新建内容">＋</button>`;
   return `<button class="tree-add-child" type="button" data-new-folder-parent="${escapeHtml(path)}" aria-label="在 ${escapeHtml(name)} 中新建文件夹" title="新建子文件夹">＋</button>`;
+}
+
+function libraryCreateMenuHtml() {
+  if (!state.libraryCreateMenuOpen || state.restructureSelecting) return '';
+  return `<div class="library-create-menu">
+    <button type="button" data-library-create-folder><span>▱</span><span><strong>新建文件夹</strong><small>在 Library 下建立分类</small></span></button>
+    <button type="button" data-library-import-urls><span>↗</span><span><strong>导入网址</strong><small>批量加入收件箱</small></span></button>
+  </div>`;
 }
 
 function structureSelectionState(path) {
@@ -313,6 +328,7 @@ function libraryRootHtml() {
         </button>
         ${folderAddButton('', 'Library')}
       </div>
+      ${libraryCreateMenuHtml()}
       ${!collapsed ? `<div class="tree-children library-root-children" role="group">${folderCreatorHtml('', 1)}${children.length ? treeHtml(children) : '<div class="tree-empty-note">暂无分类</div>'}</div>` : ''}
     </div>`;
 }
@@ -544,6 +560,7 @@ function renderList() {
     elements.collectionTitle.textContent = '收件箱';
     elements.collectionPath.textContent = 'PENDING INBOX';
     elements.resultCount.textContent = `${files.length} 个待分类文件`;
+    elements.list.closest('.catalog')?.querySelector('.catalog-hint')?.replaceChildren(document.createTextNode('文件会保留到手动执行分类'));
     elements.list.innerHTML = files.length ? files.map(file => `
       <div class="item-row inbox-file-row">
         <span class="item-type">${escapeHtml(inboxType(file))}</span>
@@ -1582,6 +1599,78 @@ async function createFolder(parent = state.creatingFolderParent || '') {
   } catch (error) { showToast(error.message); }
 }
 
+function closeUrlImportDialog() {
+  if (state.importingUrls) return;
+  elements.urlImportDialog.hidden = true;
+  elements.urlImportInput.value = '';
+  elements.urlImportFeedback.textContent = '最多 50 个 HTTP(S) 网址';
+  elements.urlImportFeedback.classList.remove('is-error');
+}
+
+function openUrlImportDialog() {
+  state.libraryCreateMenuOpen = false;
+  renderNavigation();
+  elements.urlImportDialog.hidden = false;
+  requestAnimationFrame(() => elements.urlImportInput.focus());
+}
+
+function readImportUrls() {
+  const lines = elements.urlImportInput.value.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+  const urls = [];
+  const invalid = [];
+  for (const [index, raw] of lines.entries()) {
+    try {
+      const url = new URL(raw);
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw new Error();
+      if (!urls.includes(url.toString())) urls.push(url.toString());
+    } catch { invalid.push(index + 1); }
+  }
+  if (!lines.length) throw new Error('请至少粘贴一个网址');
+  if (invalid.length) throw new Error(`第 ${invalid.join('、')} 行不是有效的 HTTP(S) 网址`);
+  if (urls.length > 50) throw new Error('一次最多导入 50 个网址');
+  return urls;
+}
+
+async function importUrlsToInbox() {
+  if (state.importingUrls) return;
+  let urls;
+  try { urls = readImportUrls(); }
+  catch (error) {
+    elements.urlImportFeedback.textContent = error.message;
+    elements.urlImportFeedback.classList.add('is-error');
+    return;
+  }
+  state.importingUrls = true;
+  elements.urlImportSubmit.disabled = true;
+  elements.urlImportInput.disabled = true;
+  elements.urlImportSubmit.textContent = '正在加入…';
+  elements.urlImportFeedback.classList.remove('is-error');
+  elements.urlImportFeedback.textContent = `正在加入 ${urls.length} 个网址`;
+  try {
+    const result = await api('/api/inbox/urls?defer=1', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ urls }),
+    });
+    elements.urlImportDialog.hidden = true;
+    elements.urlImportInput.value = '';
+    state.scope = 'inbox';
+    state.category = '';
+    state.selectedId = null;
+    setGraphMode(false);
+    await load({ quiet: true });
+    render();
+    pushNavigation();
+    showToast(`${result.files.length} 个网址已加入收件箱`);
+  } catch (error) {
+    elements.urlImportFeedback.textContent = error.message;
+    elements.urlImportFeedback.classList.add('is-error');
+  } finally {
+    state.importingUrls = false;
+    elements.urlImportSubmit.disabled = false;
+    elements.urlImportInput.disabled = false;
+    elements.urlImportSubmit.textContent = '加入收件箱';
+  }
+}
+
 async function deleteLibraryItem() {
   const item = selectedItem();
   if (!item || state.busyAction) return;
@@ -1705,6 +1794,11 @@ async function load({ quiet = false } = {}) {
 }
 
 document.addEventListener('click', event => {
+  if (state.libraryCreateMenuOpen && !event.target.closest('[data-library-create-toggle], .library-create-menu')) {
+    state.libraryCreateMenuOpen = false;
+    elements.tree.querySelector('.library-create-menu')?.remove();
+    elements.tree.querySelector('[data-library-create-toggle]')?.setAttribute('aria-expanded', 'false');
+  }
   const undoStructure = event.target.closest('[data-undo-restructure]');
   if (undoStructure) { undoRestructure(undoStructure.dataset.undoRestructure); return; }
   const restructureFolder = event.target.closest('[data-restructure-folder]');
@@ -1729,6 +1823,20 @@ document.addEventListener('click', event => {
     requestAnimationFrame(() => elements.tree.querySelector('[data-folder-name]')?.focus());
     return;
   }
+  if (event.target.closest('[data-library-create-toggle]')) {
+    state.libraryCreateMenuOpen = !state.libraryCreateMenuOpen;
+    renderNavigation();
+    return;
+  }
+  if (event.target.closest('[data-library-create-folder]')) {
+    state.libraryCreateMenuOpen = false;
+    state.creatingFolderParent = '';
+    state.collapsedFolders.delete('');
+    renderNavigation();
+    requestAnimationFrame(() => elements.tree.querySelector('[data-folder-name]')?.focus());
+    return;
+  }
+  if (event.target.closest('[data-library-import-urls]')) { openUrlImportDialog(); return; }
   const folderCreate = event.target.closest('[data-folder-create]');
   if (folderCreate) { createFolder(folderCreate.dataset.parent || ''); return; }
   if (event.target.closest('[data-folder-cancel]')) {
@@ -1969,6 +2077,18 @@ elements.sidebarToggle.addEventListener('click', () => {
 elements.inboxChooseButton.addEventListener('click', () => elements.inboxFileInput.click());
 elements.inboxFileInput.addEventListener('change', event => uploadInboxFiles(event.target.files));
 elements.processInboxButton.addEventListener('click', processInbox);
+elements.urlImportSubmit.addEventListener('click', importUrlsToInbox);
+elements.urlImportDialog.addEventListener('click', event => {
+  if (event.target === elements.urlImportDialog || event.target.closest('[data-url-import-cancel]')) closeUrlImportDialog();
+});
+elements.urlImportInput.addEventListener('input', () => {
+  elements.urlImportFeedback.textContent = '最多 50 个 HTTP(S) 网址';
+  elements.urlImportFeedback.classList.remove('is-error');
+});
+elements.urlImportInput.addEventListener('keydown', event => {
+  if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') importUrlsToInbox();
+});
+document.addEventListener('keydown', event => { if (event.key === 'Escape' && !elements.urlImportDialog.hidden) closeUrlImportDialog(); });
 for (const eventName of ['dragenter', 'dragover']) {
   elements.inboxDropzone.addEventListener(eventName, event => {
     event.preventDefault();

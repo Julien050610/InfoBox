@@ -78,7 +78,7 @@ export function createApi(library) {
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://localhost');
-      if (request.method === 'GET' && url.pathname === '/health') return send(response, 200, { status: 'ok', api_version: 9 });
+      if (request.method === 'GET' && url.pathname === '/health') return send(response, 200, { status: 'ok', api_version: 10 });
       if (request.method === 'GET' && url.pathname === '/api/library/tree') return send(response, 200, await library.tree());
       if (request.method === 'POST' && url.pathname === '/api/library/folders') {
         const payload = JSON.parse((await bodyBuffer(request)).toString('utf8'));
@@ -197,11 +197,23 @@ export function createApi(library) {
       }
       if (request.method === 'POST' && url.pathname === '/api/inbox/urls') {
         const payload = JSON.parse((await bodyBuffer(request)).toString('utf8'));
-        const source = new URL(payload.url);
-        if (!['http:', 'https:'].includes(source.protocol)) throw new Error('Only HTTP(S) URLs are supported');
-        const path = join(library.inbox, `${randomUUID()}.url`);
-        await writeFile(path, `${source.toString()}\n`);
-        return send(response, 202, await library.enqueue(path, source.toString()));
+        const values = Array.isArray(payload.urls) ? payload.urls : [payload.url];
+        if (!values.length || values.length > 50) throw new TypeError('Provide between 1 and 50 URLs');
+        const sources = [];
+        for (const value of values) {
+          const source = new URL(value);
+          if (!['http:', 'https:'].includes(source.protocol) || source.username || source.password) throw new TypeError('Only credential-free HTTP(S) URLs are supported');
+          if (!sources.some(existing => existing.toString() === source.toString())) sources.push(source);
+        }
+        const files = [];
+        for (const source of sources) {
+          const host = safeName(source.hostname.replace(/^www\./i, '')) || 'webpage';
+          const path = await availableInboxPath(library.inbox, `${host}-${randomUUID().slice(0, 8)}.url`);
+          await writeFile(path, `${source.toString()}\n`);
+          files.push({ name: basename(path), url: source.toString() });
+        }
+        if (url.searchParams.get('defer') === '1' || Array.isArray(payload.urls)) return send(response, 202, { status: 'pending', files });
+        return send(response, 202, await library.enqueue(join(library.inbox, files[0].name), files[0].url));
       }
       if (request.method === 'POST' && url.pathname === '/api/inbox/files') {
         const name = safeName(url.searchParams.get('filename'));

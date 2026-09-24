@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>InfoBox · 本地知识工作台</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=34">
+  <link rel="stylesheet" href="/styles.css?v=35">
 </head>
 <body>
   <div class="paper-grain" aria-hidden="true"></div>
@@ -193,6 +193,16 @@
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <div class="move-popover" id="movePopover" hidden></div>
   <div class="move-popover folder-filter-popover" id="folderFilterPopover" hidden></div>
-  <script type="module" src="/app.js?v=36"></script>
+  <div class="dialog-scrim" id="urlImportDialog" hidden>
+    <section class="url-import-dialog" role="dialog" aria-modal="true" aria-labelledby="urlImportTitle">
+      <header><div><p class="eyebrow">ADD TO INBOX</p><h3 id="urlImportTitle">导入网址</h3></div><button type="button" data-url-import-cancel aria-label="关闭导入网址">×</button></header>
+      <p>每行粘贴一个网页、视频或 PDF 网址。网址会先进入收件箱，等待你手动执行分类。</p>
+      <label for="urlImportInput">网址列表</label>
+      <textarea id="urlImportInput" rows="8" placeholder="https://example.com/article&#10;https://www.youtube.com/watch?v=..." spellcheck="false"></textarea>
+      <div class="url-import-feedback" id="urlImportFeedback">最多 50 个 HTTP(S) 网址</div>
+      <footer><button class="secondary-action" type="button" data-url-import-cancel>取消</button><button class="primary-action" id="urlImportSubmit" type="button">加入收件箱</button></footer>
+    </section>
+  </div>
+  <script type="module" src="/app.js?v=38"></script>
 </body>
 </html>

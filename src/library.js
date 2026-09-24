@@ -619,7 +619,12 @@ export class Library {
         skipped.push({ name: file.name, reason: 'unsupported' });
         continue;
       }
-      const job = await this.enqueue(join(this.inbox, file.name));
+      let originalName = null;
+      if (file.extension === '.url') {
+        const raw = (await readFile(join(this.inbox, file.name), 'utf8')).trim();
+        originalName = (raw.match(/^URL=(.+)$/im)?.[1] || raw).trim();
+      }
+      const job = await this.enqueue(join(this.inbox, file.name), originalName);
       if (job) jobs.push(job);
       else skipped.push({ name: file.name, reason: 'already_processing' });
     }
@@ -739,14 +744,16 @@ export class Library {
       const [categories, tags] = await Promise.all([this.categories(), this.tags()]);
       const analysis = await this.analyze(extracted, { categories, tags });
       const decision = await this.decide(extracted, analysis, { categories });
-      const category = String(decision.category || analysis.category || '未分类').split('/').map(safePart).filter(Boolean).slice(0, 32).join('/') || '未分类';
+      const proposedCategory = String(decision.category || analysis.category || '').trim();
+      const category = proposedCategory.split('/').map(safePart).filter(Boolean).slice(0, 32).join('/') || '未分类';
+      const classificationUncertain = !proposedCategory || /^(未分类|无法分类|unknown|uncategorized)$/i.test(category);
       const title = safePart(analysis.title || extracted.title || basename(path, extname(path))) || 'Untitled';
       const sourceDate = publicationDate(extracted.publishedAt?.slice(0, 10));
       const evidence = String(analysis.publication_evidence || '').trim();
       const evidenceText = [extracted.text, analysis.extraction?.visible_text].filter(Boolean).join('\n');
       const publishedAt = sourceDate || (evidence && evidenceText.includes(evidence) ? publicationDate(analysis.published_at) : null);
       const datePrefix = (publishedAt || receivedAt).slice(0, 7);
-      const status = decision.needs_review ? 'review' : 'ready';
+      const status = decision.needs_review || classificationUncertain ? 'review' : 'ready';
       const folder = status === 'ready' ? join(this.library, ...category.split('/')) : join(this.review, job.id);
       await mkdir(folder, { recursive: true });
       let stem = `${datePrefix}-${title}`;
@@ -763,7 +770,7 @@ export class Library {
         summary_basis: extracted.basis, fingerprint,
         analysis_provider: analysis.provider || null, analysis_model: analysis.model || null,
         decision_provider: decision.provider || 'analysis_model', decision_confidence: decision.confidence ?? null,
-        review_reason: decision.review_reason || '', extraction: analysis.extraction || null,
+        review_reason: decision.review_reason || (classificationUncertain ? '无法可靠判断资料分类' : ''), extraction: analysis.extraction || null,
         corrected_text: null,
       };
       const metaPath = join(folder, `${stem}.json`);
