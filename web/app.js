@@ -210,16 +210,22 @@ function inboxType(file) {
   return String(file.extension || '').replace('.', '').toUpperCase() || 'FILE';
 }
 
-function filteredItems() {
-  const query = state.query.trim();
-  const filters = state.filters;
-  const results = state.items.filter(item => {
+function scopedItems() {
+  return state.items.filter(item => {
     if (state.scope === 'review' && item.status !== 'review') return false;
     if (state.scope === 'recent' && !isRecent(item)) return false;
     if (state.scope === 'favorites' && !item.favorite) return false;
     if (state.scope === 'unread' && item.reading_status !== 'unread') return false;
     if (state.scope === 'category' && item.status !== 'ready') return false;
     if (state.scope === 'category' && item.category !== state.category && !item.category?.startsWith(`${state.category}/`)) return false;
+    return true;
+  });
+}
+
+function filteredItems() {
+  const query = state.query.trim();
+  const filters = state.filters;
+  const results = scopedItems().filter(item => {
     if (query && !state.searchMatches.has(item.id)) return false;
     if (filters.kinds.length && !filters.kinds.includes(item.kind)) return false;
     if (filters.status && item.status !== filters.status) return false;
@@ -561,7 +567,12 @@ function renderList() {
 }
 
 function graphData() {
-  const items = filteredItems().slice(0, 100);
+  const matchedItems = filteredItems();
+  const matchingIds = new Set(matchedItems.map(item => item.id));
+  const filtering = Boolean(state.query.trim() || activeFilterCount());
+  const items = filtering
+    ? [...matchedItems, ...scopedItems().filter(item => !matchingIds.has(item.id))].slice(0, 100)
+    : matchedItems.slice(0, 100);
   const palette = ['#2f7668', '#bd7047', '#607db0', '#9a7a32', '#7d6098', '#64854b'];
   const nodes = [{ id: 'root', type: 'root', label: 'Library', depth: 0, color: '#173f35' }];
   const edges = [];
@@ -608,12 +619,12 @@ function graphData() {
   }
   similarity.sort((a, b) => b.score - a.score);
   edges.push(...similarity.slice(0, 120));
-  return { nodes, edges, items };
+  return { nodes, edges, items, matchingIds, filtering };
 }
 
 function renderGraph() {
   if (!state.graphMode) return;
-  const { nodes, edges, items } = graphData();
+  const { nodes, edges, items, matchingIds, filtering } = graphData();
   if (nodes.length === 1) {
     elements.graphCanvas.innerHTML = '<div class="graph-empty">当前条件下没有可绘制的资料</div>';
     return;
@@ -622,8 +633,8 @@ function renderGraph() {
   const height = Math.max(430, elements.graphCanvas.clientHeight || 620);
   const byId = new Map(nodes.map(node => [node.id, node]));
   if (!byId.has(state.graphFocusId)) state.graphFocusId = 'root';
-  const activeIds = new Set();
-  if (state.graphFocusId === 'root') nodes.forEach(node => activeIds.add(node.id));
+  const focusIds = new Set();
+  if (state.graphFocusId === 'root') nodes.forEach(node => focusIds.add(node.id));
   else {
     const children = new Map();
     for (const edge of edges.filter(edge => edge.type === 'structure')) {
@@ -633,11 +644,19 @@ function renderGraph() {
     const pending = [state.graphFocusId];
     while (pending.length) {
       const id = pending.shift();
-      if (activeIds.has(id)) continue;
-      activeIds.add(id);
+      if (focusIds.has(id)) continue;
+      focusIds.add(id);
       pending.push(...(children.get(id) || []));
     }
   }
+  const filterIds = new Set(['root']);
+  if (filtering) for (const item of items) {
+    if (!matchingIds.has(item.id)) continue;
+    filterIds.add(item.id);
+    const parts = String(item.category || '未分类').split('/').filter(Boolean);
+    parts.forEach((_, index) => filterIds.add(`folder:${parts.slice(0, index + 1).join('/')}`));
+  }
+  const activeIds = filtering ? new Set([...focusIds].filter(id => filterIds.has(id))) : focusIds;
   const structuralEdges = edges.filter(edge => edge.type === 'structure');
   const children = new Map();
   for (const edge of structuralEdges) {
@@ -699,7 +718,7 @@ function renderGraph() {
     const data = node.type === 'item' ? `data-graph-item="${node.id}"` : node.type === 'folder' ? `data-graph-category="${escapeHtml(node.path)}" data-graph-node="${node.id}"` : 'data-graph-root data-graph-node="root"';
     const detailY = node.y < 70 ? 15 : -41;
     const detail = node.type === 'item' ? `<g class="graph-detail-label"><rect x="${(-detailWidth / 2).toFixed(1)}" y="${detailY}" width="${detailWidth}" height="26" rx="6"></rect><text x="0" y="${detailY + 17}" text-anchor="middle">${escapeHtml(detailLabel)}</text></g>` : '';
-    return `<g class="graph-node ${node.type} ${node.id === state.selectedId ? 'is-selected' : ''} ${node.id === state.graphFocusId ? 'is-focused' : ''} ${activeIds.has(node.id) ? '' : 'is-muted'}" style="--node-color:${node.color}" transform="translate(${node.x.toFixed(1)} ${node.y.toFixed(1)})" ${data}><circle r="${radius}"></circle><text class="graph-short-label" x="${radius + 7}" y="3">${escapeHtml(shortLabel)}</text>${detail}<title>${escapeHtml(node.label)}</title></g>`;
+    return `<g class="graph-node ${node.type} ${node.id === state.selectedId ? 'is-selected' : ''} ${node.id === state.graphFocusId ? 'is-focused' : ''} ${activeIds.has(node.id) ? '' : 'is-muted'}" style="--node-color:${node.color}" transform="translate(${node.x.toFixed(1)} ${node.y.toFixed(1)})" ${data}><circle class="graph-hit-area" r="${radius + 5}"></circle><circle class="graph-node-dot" r="${radius}"></circle><text class="graph-short-label" x="${radius + 7}" y="3">${escapeHtml(shortLabel)}</text>${detail}<title>${escapeHtml(node.label)}</title></g>`;
   }).join('');
   elements.graphCanvas.innerHTML = `<svg class="knowledge-graph" viewBox="0 0 ${width} ${height}" role="img" aria-label="文件夹与资料关系图"><g class="graph-stage">${edgeHtml}${nodeHtml}</g></svg>`;
   elements.graphCanvas.querySelectorAll('.graph-node.item').forEach(node => {
@@ -2018,24 +2037,25 @@ document.querySelectorAll('[data-graph-action]').forEach(button => button.addEve
   else resetGraphViewport();
 }));
 let graphClickTimer = null;
+const graphClickDelay = 180;
 elements.graphCanvas.addEventListener('click', event => {
   event.stopPropagation();
   if (state.graphMoved) { state.graphMoved = false; return; }
   const item = event.target.closest('[data-graph-item]');
   if (item) {
     clearTimeout(graphClickTimer);
-    graphClickTimer = setTimeout(() => focusGraphNode(item.dataset.graphItem, item.dataset.graphItem), 220);
+    graphClickTimer = setTimeout(() => focusGraphNode(item.dataset.graphItem, item.dataset.graphItem), graphClickDelay);
     return;
   }
   const folder = event.target.closest('[data-graph-category]');
   if (folder) {
     clearTimeout(graphClickTimer);
-    graphClickTimer = setTimeout(() => focusGraphNode(folder.dataset.graphNode), 220);
+    graphClickTimer = setTimeout(() => focusGraphNode(folder.dataset.graphNode), graphClickDelay);
     return;
   }
   if (event.target.closest('[data-graph-root]')) {
     clearTimeout(graphClickTimer);
-    graphClickTimer = setTimeout(() => focusGraphNode('root'), 220);
+    graphClickTimer = setTimeout(() => focusGraphNode('root'), graphClickDelay);
   }
 });
 elements.graphCanvas.addEventListener('dblclick', event => {

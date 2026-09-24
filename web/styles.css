@@ -815,12 +815,13 @@ kbd { padding: 3px 6px; color: #7a817c; background: var(--surface); border: 1px 
 .graph-edge.similarity { stroke: rgba(85,116,75,.55); stroke-width: 1; stroke-dasharray: 5 5; }
 .graph-node { cursor: pointer; transition: opacity .2s; }
 .graph-node.is-muted, .graph-edge.is-muted { opacity: .11; }
-.graph-node.is-focused circle { stroke: var(--ochre); stroke-width: 3; }
-.graph-node circle { stroke: #fffaf0; stroke-width: 2; filter: drop-shadow(0 3px 5px rgba(28,41,37,.13)); }
-.graph-node.root circle { fill: var(--forest); }
-.graph-node.folder circle { fill: var(--node-color); }
-.graph-node.item circle { fill: #fbf9f3; stroke: var(--node-color); }
-.graph-node.item.is-selected circle { fill: var(--ochre-soft); stroke: var(--ochre); stroke-width: 3; }
+.graph-node .graph-hit-area { fill: transparent; stroke: transparent; stroke-width: 0; filter: none; pointer-events: all; }
+.graph-node.is-focused .graph-node-dot { stroke: var(--ochre); stroke-width: 3; }
+.graph-node .graph-node-dot { stroke: #fffaf0; stroke-width: 2; filter: drop-shadow(0 3px 5px rgba(28,41,37,.13)); }
+.graph-node.root .graph-node-dot { fill: var(--forest); }
+.graph-node.folder .graph-node-dot { fill: var(--node-color); }
+.graph-node.item .graph-node-dot { fill: #fbf9f3; stroke: var(--node-color); }
+.graph-node.item.is-selected .graph-node-dot { fill: var(--ochre-soft); stroke: var(--ochre); stroke-width: 3; }
 .graph-node text { fill: var(--ink); font: 9px var(--sans); paint-order: stroke; stroke: rgba(243,240,232,.92); stroke-width: 3px; stroke-linejoin: round; }
 .graph-node.root text, .graph-node.folder text { font-weight: 700; }
 .graph-short-label { transition: opacity .15s; }
