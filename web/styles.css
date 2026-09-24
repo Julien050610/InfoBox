@@ -229,6 +229,7 @@ button, a { -webkit-tap-highlight-color: transparent; }
 
 .tree { min-height: 0; overflow: auto; scrollbar-color: rgba(255, 255, 255, .15) transparent; }
 .tree-branch { margin: 1px 0; }
+.tree-node-shell { position: relative; }
 .tree-children { position: relative; }
 .tree-children::before { content: ""; position: absolute; top: 0; bottom: 7px; left: 18px; border-left: 1px solid rgba(255, 255, 255, .1); }
 
@@ -258,6 +259,10 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .tree-node .folder.is-collapsed { transform: rotate(-90deg); }
 .tree-node .node-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .tree-node .node-count { color: rgba(255, 255, 255, .35); font-size: 10px; }
+.tree-node-shell:has(.tree-add-child) .tree-node { padding-right: 33px; }
+.tree-add-child { position: absolute; z-index: 2; top: 50%; right: 6px; width: 23px; height: 23px; display: grid; place-items: center; padding: 0; color: #f0d29a; background: rgba(212,177,123,.12); border: 1px solid rgba(212,177,123,.24); border-radius: 4px; cursor: pointer; font-size: 14px; line-height: 1; opacity: 0; transform: translateY(-50%) scale(.88); pointer-events: none; transition: opacity .14s ease, transform .14s ease, background .14s ease; }
+.tree-node-shell:hover .tree-add-child, .tree-node-shell:focus-within .tree-add-child { opacity: 1; transform: translateY(-50%) scale(1); pointer-events: auto; }
+.tree-add-child:hover, .tree-add-child:focus-visible { color: var(--forest); background: #d4b17b; border-color: #d4b17b; outline: 0; }
 .tree-root-node { min-height: 38px; color: #f3dfb7; background: rgba(212,177,123,.07); border: 1px solid rgba(212,177,123,.18); font-weight: 700; }
 .tree-root-node:hover { background: rgba(212,177,123,.12); }
 .tree-root-node.is-active { background: rgba(212,177,123,.17); box-shadow: inset 3px 0 0 #d4b17b; }
@@ -267,14 +272,17 @@ button, a { -webkit-tap-highlight-color: transparent; }
 .restructure-checkbox.is-checked { color: var(--forest); background: #d4b17b; border-color: #d4b17b; }
 .restructure-checkbox.is-locked { opacity: .62; cursor: default; }
 .tree-children.is-empty::before { bottom: 15px; }
-.tree-create-row { width: calc(100% - 8px); min-height: 27px; display: grid; grid-template-columns: 18px minmax(0,1fr); align-items: center; gap: 4px; margin: 1px 4px 4px; padding: 0 7px 0 calc(8px + var(--depth, 0) * 14px); color: rgba(255,255,255,.38); background: transparent; border: 0; border-radius: 5px; cursor: pointer; text-align: left; font-size: 9px; }
-.tree-create-row:hover { color: #e8c98f; background: rgba(255,255,255,.055); }
-.tree-create-row span:first-child { color: #d4b17b; font-size: 12px; }
 .tree-inline-creator { display: grid; grid-template-columns: minmax(0,1fr) 40px 25px; gap: 4px; margin: 3px 4px 7px; padding-left: calc(8px + var(--depth, 0) * 14px); }
 .tree-inline-creator input { min-width: 0; height: 29px; padding: 0 7px; color: #fff; background: #17372f; border: 1px solid rgba(212,177,123,.45); border-radius: 4px; outline: 0; font-size: 9px; }
 .tree-inline-creator button { height: 29px; padding: 0; color: rgba(255,255,255,.7); background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.12); border-radius: 4px; cursor: pointer; font-size: 8px; }
 .tree-inline-creator button:nth-of-type(1) { color: var(--forest); background: #d4b17b; border-color: #d4b17b; font-weight: 700; }
 .tree-empty-note { padding: 8px 12px; color: rgba(255,255,255,.35); font-size: 9px; }
+.tree-section { transition: background .2s ease, box-shadow .2s ease; }
+.tree-section.is-restructure-mode { background: linear-gradient(180deg, rgba(212,177,123,.08), transparent 38%); box-shadow: inset 0 1px 0 rgba(212,177,123,.18); }
+.tree.is-restructure-mode { padding: 5px; border: 1px solid rgba(212,177,123,.38); border-radius: 8px; box-shadow: 0 0 0 3px rgba(212,177,123,.07), inset 0 0 24px rgba(212,177,123,.04); }
+.tree-restructure-hint { position: sticky; top: 0; z-index: 4; display: grid; gap: 2px; margin: 0 0 6px; padding: 8px 9px; color: #f7e5bd; background: rgba(34,72,61,.96); border: 1px solid rgba(212,177,123,.42); border-radius: 6px; box-shadow: 0 6px 18px rgba(3,22,17,.22); }
+.tree-restructure-hint span { font-size: 9px; font-weight: 700; letter-spacing: .04em; }
+.tree-restructure-hint small { color: rgba(255,255,255,.5); font-size: 8px; }
 
 .sidebar-footer {
   display: flex;

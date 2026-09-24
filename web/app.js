@@ -252,8 +252,13 @@ function activeFilterCount() {
 }
 
 function folderCreatorHtml(parent, depth) {
-  if (state.creatingFolderParent !== parent) return `<button class="tree-create-row" type="button" data-new-folder-parent="${escapeHtml(parent)}" style="--depth:${depth}"><span>＋</span><span>${parent ? '新建子文件夹' : '在 Library 中新建文件夹'}</span></button>`;
+  if (state.creatingFolderParent !== parent) return '';
   return `<div class="tree-inline-creator" style="--depth:${depth}"><input data-folder-name maxlength="80" placeholder="文件夹名称" aria-label="文件夹名称"><button type="button" data-folder-create data-parent="${escapeHtml(parent)}">创建</button><button type="button" data-folder-cancel>×</button></div>`;
+}
+
+function folderAddButton(path, name) {
+  if (state.restructureSelecting) return '';
+  return `<button class="tree-add-child" type="button" data-new-folder-parent="${escapeHtml(path)}" aria-label="在 ${escapeHtml(name)} 中新建文件夹" title="新建子文件夹">＋</button>`;
 }
 
 function structureSelectionState(path) {
@@ -269,13 +274,16 @@ function treeHtml(nodes, depth = 1) {
     const selection = structureSelectionState(node.path);
     return `
     <div class="tree-branch" role="treeitem">
-      <button class="tree-node ${state.scope === 'category' && state.category === node.path ? 'is-active' : ''}"
-        data-category="${escapeHtml(node.path)}" style="--depth:${depth}">
-        <span class="folder ${hasChildren ? '' : 'is-leaf'} ${collapsed ? 'is-collapsed' : ''}" ${hasChildren ? `data-tree-toggle="${escapeHtml(node.path)}"` : ''}>${hasChildren ? '▾' : '▱'}</span>
-        <span class="node-name">${escapeHtml(node.name)}</span><span class="node-count">${node.count}</span>
-        ${state.restructureSelecting ? `<span class="restructure-checkbox ${selection.checked ? 'is-checked' : ''} ${selection.locked ? 'is-locked' : ''}" role="checkbox" aria-checked="${selection.checked}" data-restructure-folder="${escapeHtml(node.path)}">${selection.checked ? '✓' : ''}</span>` : ''}
-      </button>
-      ${!collapsed ? `<div class="tree-children ${hasChildren ? '' : 'is-empty'}" role="group">${treeHtml(node.children || [], depth + 1)}${folderCreatorHtml(node.path, depth + 1)}</div>` : ''}
+      <div class="tree-node-shell">
+        <button class="tree-node ${state.scope === 'category' && state.category === node.path ? 'is-active' : ''}"
+          data-category="${escapeHtml(node.path)}" style="--depth:${depth}">
+          <span class="folder ${hasChildren ? '' : 'is-leaf'} ${collapsed ? 'is-collapsed' : ''}" ${hasChildren ? `data-tree-toggle="${escapeHtml(node.path)}"` : ''}>${hasChildren ? '▾' : '▱'}</span>
+          <span class="node-name">${escapeHtml(node.name)}</span><span class="node-count">${node.count}</span>
+          ${state.restructureSelecting ? `<span class="restructure-checkbox ${selection.checked ? 'is-checked' : ''} ${selection.locked ? 'is-locked' : ''}" role="checkbox" aria-checked="${selection.checked}" data-restructure-folder="${escapeHtml(node.path)}">${selection.checked ? '✓' : ''}</span>` : ''}
+        </button>
+        ${folderAddButton(node.path, node.name)}
+      </div>
+      ${!collapsed ? `<div class="tree-children ${hasChildren ? '' : 'is-empty'}" role="group">${folderCreatorHtml(node.path, depth + 1)}${treeHtml(node.children || [], depth + 1)}</div>` : ''}
     </div>`;
   }).join('');
 }
@@ -286,12 +294,15 @@ function libraryRootHtml() {
   const children = state.tree?.children || [];
   return `
     <div class="tree-branch library-root" role="treeitem" aria-level="1">
-      <button class="tree-node tree-root-node ${state.scope === 'all' ? 'is-active' : ''}" data-scope="all" style="--depth:0">
-        <span class="folder ${collapsed ? 'is-collapsed' : ''}" data-tree-toggle="">▾</span>
-        <span class="node-name">Library</span><span class="node-count">${state.tree?.count || 0}</span>
-        ${state.restructureSelecting ? `<span class="restructure-checkbox ${selection.checked ? 'is-checked' : ''}" role="checkbox" aria-checked="${selection.checked}" data-restructure-folder="">${selection.checked ? '✓' : ''}</span>` : ''}
-      </button>
-      ${!collapsed ? `<div class="tree-children library-root-children" role="group">${children.length ? treeHtml(children) : '<div class="tree-empty-note">暂无分类</div>'}${folderCreatorHtml('', 1)}</div>` : ''}
+      <div class="tree-node-shell">
+        <button class="tree-node tree-root-node ${state.scope === 'all' ? 'is-active' : ''}" data-scope="all" style="--depth:0">
+          <span class="folder ${collapsed ? 'is-collapsed' : ''}" data-tree-toggle="">▾</span>
+          <span class="node-name">Library</span><span class="node-count">${state.tree?.count || 0}</span>
+          ${state.restructureSelecting ? `<span class="restructure-checkbox ${selection.checked ? 'is-checked' : ''}" role="checkbox" aria-checked="${selection.checked}" data-restructure-folder="">${selection.checked ? '✓' : ''}</span>` : ''}
+        </button>
+        ${folderAddButton('', 'Library')}
+      </div>
+      ${!collapsed ? `<div class="tree-children library-root-children" role="group">${folderCreatorHtml('', 1)}${children.length ? treeHtml(children) : '<div class="tree-empty-note">暂无分类</div>'}</div>` : ''}
     </div>`;
 }
 
@@ -306,7 +317,9 @@ function renderNavigation() {
   elements.favoriteCount.textContent = state.items.filter(item => item.favorite).length;
   elements.unreadCount.textContent = state.items.filter(item => item.reading_status === 'unread').length;
   elements.libraryCount.textContent = readyCount;
-  elements.tree.innerHTML = libraryRootHtml();
+  elements.tree.classList.toggle('is-restructure-mode', state.restructureSelecting);
+  elements.tree.closest('.tree-section')?.classList.toggle('is-restructure-mode', state.restructureSelecting);
+  elements.tree.innerHTML = `${state.restructureSelecting ? '<div class="tree-restructure-hint"><span>选择需要重构的目录</span><small>勾选父级会包含全部子级</small></div>' : ''}${libraryRootHtml()}`;
   const selectedCount = state.selectedStructureFolders.size;
   elements.structureButton.setAttribute('aria-pressed', String(state.restructureSelecting));
   elements.structureButton.innerHTML = state.structureBusy ? '<span>◌</span> 正在重构…' : state.restructureSelecting ? `<span>✓</span> 执行重构${selectedCount ? ` (${selectedCount})` : ''}` : '<span>⌘</span> 重构';
@@ -550,7 +563,7 @@ function renderList() {
 function graphData() {
   const items = filteredItems().slice(0, 100);
   const palette = ['#2f7668', '#bd7047', '#607db0', '#9a7a32', '#7d6098', '#64854b'];
-  const nodes = [{ id: 'root', type: 'root', label: '知识库', depth: 0, color: '#173f35' }];
+  const nodes = [{ id: 'root', type: 'root', label: 'Library', depth: 0, color: '#173f35' }];
   const edges = [];
   const known = new Set(['root']);
   const topFolders = [];
@@ -765,6 +778,20 @@ function openGraphItem(id) {
   pushNavigation();
   const item = selectedItem();
   if (item?.reading_status === 'unread') patchOrganization({ reading_status: 'reading', last_opened_at: new Date().toISOString() });
+}
+
+function openGraphFolder(path = '') {
+  state.scope = path ? 'category' : 'all';
+  state.category = path;
+  state.selectedId = null;
+  state.editingItemId = null;
+  state.query = '';
+  state.searchMatches = new Map();
+  state.filters = { kinds: [], tags: [], tagMode: 'and', status: '', readingStatuses: [], favorite: 'any', scoreMin: 0, publishedFrom: '', publishedTo: '', receivedFrom: '', receivedTo: '', sort: 'received_desc' };
+  elements.search.value = '';
+  setGraphMode(false);
+  render();
+  pushNavigation();
 }
 
 function selectedItem() {
@@ -2001,16 +2028,27 @@ elements.graphCanvas.addEventListener('click', event => {
     return;
   }
   const folder = event.target.closest('[data-graph-category]');
-  if (folder) { focusGraphNode(folder.dataset.graphNode); return; }
-  if (event.target.closest('[data-graph-root]')) focusGraphNode('root');
+  if (folder) {
+    clearTimeout(graphClickTimer);
+    graphClickTimer = setTimeout(() => focusGraphNode(folder.dataset.graphNode), 220);
+    return;
+  }
+  if (event.target.closest('[data-graph-root]')) {
+    clearTimeout(graphClickTimer);
+    graphClickTimer = setTimeout(() => focusGraphNode('root'), 220);
+  }
 });
 elements.graphCanvas.addEventListener('dblclick', event => {
   const item = event.target.closest('[data-graph-item]');
-  if (!item) return;
+  const folder = event.target.closest('[data-graph-category]');
+  const root = event.target.closest('[data-graph-root]');
+  if (!item && !folder && !root) return;
   event.preventDefault();
   event.stopPropagation();
   clearTimeout(graphClickTimer);
-  openGraphItem(item.dataset.graphItem);
+  if (item) openGraphItem(item.dataset.graphItem);
+  else if (folder) openGraphFolder(folder.dataset.graphCategory);
+  else openGraphFolder('');
 });
 elements.graphCanvas.addEventListener('wheel', event => {
   event.preventDefault();
