@@ -84,6 +84,10 @@ const elements = {
   filterButton: document.querySelector('#filterButton'),
   filterCount: document.querySelector('#filterCount'),
   filterPanel: document.querySelector('#filterPanel'),
+  folderFilter: document.querySelector('#folderFilter'),
+  folderFilterButton: document.querySelector('#folderFilterButton'),
+  folderFilterSelection: document.querySelector('#folderFilterSelection'),
+  folderFilterPopover: document.querySelector('#folderFilterPopover'),
   structureHistory: document.querySelector('#structureHistory'),
   movePopover: document.querySelector('#movePopover'),
   graphButton: document.querySelector('#graphButton'),
@@ -354,8 +358,8 @@ function renderFilterPanel() {
   const collectFolders = nodes => nodes.forEach(node => { folders.push(node.path); collectFolders(node.children || []); });
   collectFolders(state.tree?.children || []);
   const selectedFolder = state.filters.folder || (state.scope === 'category' ? state.category : '');
-  document.querySelector('#folderFilter').innerHTML = ['<option value="">Library</option>', ...folders.map(path => `<option value="${escapeHtml(path)}">Library / ${escapeHtml(path)}</option>`)].join('');
-  document.querySelector('#folderFilter').value = selectedFolder;
+  elements.folderFilter.value = selectedFolder;
+  elements.folderFilterSelection.textContent = selectedFolder ? `Library / ${selectedFolder}` : 'Library';
   document.querySelector('#kindFilters').innerHTML = kinds.map(kind => chip('kinds', kind, kindNames[kind] || kind, state.filters.kinds.includes(kind))).join('') || '<span class="summary">暂无类型</span>';
   document.querySelector('#readingFilters').innerHTML = Object.entries(readingNames).map(([value, label]) => chip('readingStatuses', value, label, state.filters.readingStatuses.includes(value))).join('');
   document.querySelector('#tagFilters').innerHTML = tags.map(tag => chip('tags', tag, tag, state.filters.tags.includes(tag))).join('') || '<span class="summary">暂无标签</span>';
@@ -373,7 +377,7 @@ function renderFilterPanel() {
 function readFilterPanel() {
   const checked = group => [...elements.filterPanel.querySelectorAll(`[data-filter-group="${group}"]:checked`)].map(input => input.value);
   state.filters = {
-    folder: document.querySelector('#folderFilter').value, kinds: checked('kinds'), tags: checked('tags'), tagMode: document.querySelector('#tagMode').value,
+    folder: elements.folderFilter.value, kinds: checked('kinds'), tags: checked('tags'), tagMode: document.querySelector('#tagMode').value,
     status: document.querySelector('#statusFilter').value, readingStatuses: checked('readingStatuses'),
     favorite: document.querySelector('#favoriteFilter').value, scoreMin: Number(document.querySelector('#scoreFilter').value),
     publishedFrom: document.querySelector('#publishedFrom').value, publishedTo: document.querySelector('#publishedTo').value,
@@ -392,6 +396,7 @@ function resetFilters() {
 function toggleFilterPanel(show = elements.filterPanel.hidden) {
   elements.filterPanel.hidden = !show;
   elements.filterButton.setAttribute('aria-expanded', String(show));
+  if (!show) closeFolderFilterMenu();
   if (show) {
     toggleRollbackPanel(false);
     renderFilterPanel();
@@ -565,8 +570,8 @@ function renderList() {
   const title = state.scope === 'review' ? '待检查' : state.scope === 'recent' ? '最近添加' : state.scope === 'favorites' ? '收藏' : state.scope === 'unread' ? '未读' : state.scope === 'category' ? state.category.split('/').at(-1) : 'Library';
   const filtering = Boolean(state.query.trim() || activeFilterCount());
   const filterFolder = state.filters.folder || currentPath || 'Library';
-  elements.collectionTitle.textContent = state.graphMode ? '知识图谱' : filtering ? '筛选结果' : title;
-  elements.collectionPath.textContent = state.graphMode ? 'KNOWLEDGE HOME' : filtering ? `筛选文件夹 · ${filterFolder === 'Library' ? 'Library' : `Library / ${filterFolder}`}` : currentPath ? `LIBRARY / ${currentPath.toUpperCase()}` : 'KNOWLEDGE LIBRARY';
+  elements.collectionTitle.textContent = filtering ? '筛选结果' : state.graphMode ? '知识图谱' : title;
+  elements.collectionPath.textContent = filtering ? `筛选文件夹 · ${filterFolder === 'Library' ? 'Library' : `Library / ${filterFolder}`}` : state.graphMode ? 'KNOWLEDGE HOME' : currentPath ? `LIBRARY / ${currentPath.toUpperCase()}` : 'KNOWLEDGE LIBRARY';
   elements.resultCount.textContent = browsingDirectory ? `${folders.length} 个文件夹 · ${items.length} 个文件` : `${items.length} 项资料`;
   elements.list.closest('.catalog')?.querySelector('.catalog-hint')?.replaceChildren(document.createTextNode(browsingDirectory ? '进入文件夹，或选择文件打开预览' : '选择一项即可在下方阅读'));
   if (!items.some(item => item.id === state.selectedId)) state.selectedId = null;
@@ -1078,27 +1083,61 @@ function relationBuilderHtml(candidates) {
     </div>`;
 }
 
-function moveMenuBranchHtml(nodes, sourceFolder = '') {
+function folderMenuBranchHtml(nodes, { sourceFolder = '', mode = 'move' } = {}) {
   return nodes.map(node => {
     if (sourceFolder && (node.path === sourceFolder || node.path.startsWith(`${sourceFolder}/`))) return '';
-    const children = moveMenuBranchHtml(node.children || [], sourceFolder);
-    return `<div class="move-menu-branch"><button type="button" data-move-destination="${escapeHtml(node.path)}"><span>▱ ${escapeHtml(node.name)}</span>${children ? '<b>›</b>' : ''}</button>${children ? `<div class="move-menu-submenu">${children}</div>` : ''}</div>`;
+    const children = folderMenuBranchHtml(node.children || [], { sourceFolder, mode });
+    const attribute = mode === 'filter' ? 'data-filter-folder' : 'data-move-destination';
+    return `<div class="move-menu-branch"><button type="button" ${attribute}="${escapeHtml(node.path)}"><span>▱ ${escapeHtml(node.name)}</span>${children ? '<b class="menu-direction">›</b>' : ''}</button>${children ? `<div class="move-menu-submenu">${children}</div>` : ''}</div>`;
   }).join('');
 }
 
+function folderMenuDepth(nodes) {
+  if (!nodes?.length) return 1;
+  return 1 + Math.max(0, ...nodes.map(node => folderMenuDepth(node.children || [])));
+}
+
+function positionFolderMenu(popover, anchor, nodes) {
+  const rect = anchor.getBoundingClientRect();
+  const depth = Math.min(3, folderMenuDepth(nodes));
+  const requiredWidth = 220 + (depth - 1) * 213;
+  const roomRight = window.innerWidth - rect.left - 8;
+  const roomLeft = rect.right - 8;
+  const direction = roomRight >= Math.min(requiredWidth, window.innerWidth - 16) || roomRight >= roomLeft ? 'right' : 'left';
+  popover.dataset.cascadeDirection = direction;
+  popover.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 230))}px`;
+  popover.style.top = `${Math.max(8, Math.min(rect.bottom + 5, window.innerHeight - 330))}px`;
+}
+
 function openMoveMenu(entity, anchor) {
+  closeFolderFilterMenu();
+  document.querySelectorAll('[data-relation-cascade-popover]').forEach(value => { value.hidden = true; });
   state.moveEntity = entity;
-  const branches = moveMenuBranchHtml(state.tree?.children || [], entity.type === 'folder' ? entity.path : '');
+  const nodes = state.tree?.children || [];
+  const branches = folderMenuBranchHtml(nodes, { sourceFolder: entity.type === 'folder' ? entity.path : '' });
   elements.movePopover.innerHTML = `${entity.type === 'folder' ? '<button class="move-root-option" type="button" data-move-destination=""><span>⌂ Library</span></button>' : ''}<div class="move-menu-tree">${branches || '<div class="move-menu-empty">没有可用的目标文件夹</div>'}</div>`;
   elements.movePopover.hidden = false;
-  const rect = anchor.getBoundingClientRect();
-  elements.movePopover.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 230))}px`;
-  elements.movePopover.style.top = `${Math.max(8, Math.min(rect.bottom + 5, window.innerHeight - 330))}px`;
+  positionFolderMenu(elements.movePopover, anchor, nodes);
 }
 
 function closeMoveMenu() {
   state.moveEntity = null;
   elements.movePopover.hidden = true;
+}
+
+function openFolderFilterMenu() {
+  closeMoveMenu();
+  const nodes = state.tree?.children || [];
+  const branches = folderMenuBranchHtml(nodes, { mode: 'filter' });
+  elements.folderFilterPopover.innerHTML = `<button class="move-root-option" type="button" data-filter-folder=""><span>⌂ Library</span></button><div class="move-menu-tree">${branches || '<div class="move-menu-empty">暂无文件夹</div>'}</div>`;
+  elements.folderFilterPopover.hidden = false;
+  elements.folderFilterButton.setAttribute('aria-expanded', 'true');
+  positionFolderMenu(elements.folderFilterPopover, elements.folderFilterButton, nodes);
+}
+
+function closeFolderFilterMenu() {
+  elements.folderFilterPopover.hidden = true;
+  elements.folderFilterButton?.setAttribute('aria-expanded', 'false');
 }
 
 async function performMove(destination) {
@@ -1716,6 +1755,21 @@ document.addEventListener('click', event => {
     return;
   }
   if (!event.target.closest('#movePopover')) closeMoveMenu();
+  const folderFilterToggle = event.target.closest('#folderFilterButton');
+  if (folderFilterToggle) {
+    event.stopPropagation();
+    if (elements.folderFilterPopover.hidden) openFolderFilterMenu();
+    else closeFolderFilterMenu();
+    return;
+  }
+  const filterFolder = event.target.closest('[data-filter-folder]');
+  if (filterFolder) {
+    elements.folderFilter.value = filterFolder.dataset.filterFolder;
+    elements.folderFilterSelection.textContent = filterFolder.dataset.filterFolder ? `Library / ${filterFolder.dataset.filterFolder}` : 'Library';
+    closeFolderFilterMenu();
+    return;
+  }
+  if (!event.target.closest('#folderFilterPopover')) closeFolderFilterMenu();
   const openFolder = event.target.closest('[data-open-folder]');
   if (openFolder) {
     state.scope = 'category';
@@ -1729,6 +1783,8 @@ document.addEventListener('click', event => {
   }
   const relationCascadeToggle = event.target.closest('[data-relation-cascade-toggle]');
   if (relationCascadeToggle) {
+    closeMoveMenu();
+    closeFolderFilterMenu();
     const cascade = relationCascadeToggle.closest('.relation-cascade');
     const popover = cascade?.querySelector('[data-relation-cascade-popover]');
     if (!popover) return;
@@ -1985,7 +2041,7 @@ document.addEventListener('pointerover', event => {
   const moveSubmenu = moveOption?.nextElementSibling;
   if (moveSubmenu?.matches('.move-menu-submenu')) {
     const rect = moveOption.getBoundingClientRect();
-    const openLeft = rect.right + 210 > window.innerWidth;
+    const openLeft = moveOption.closest('[data-cascade-direction]')?.dataset.cascadeDirection === 'left';
     moveSubmenu.style.left = `${openLeft ? Math.max(8, rect.left - 212) : rect.right + 3}px`;
     moveSubmenu.style.top = `${Math.max(8, Math.min(rect.top - 5, window.innerHeight - 295))}px`;
   }
