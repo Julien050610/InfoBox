@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light">
   <title>InfoBox · 本地知识工作台</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/styles.css?v=35">
+  <link rel="stylesheet" href="/styles.css?v=37">
 </head>
 <body>
   <div class="paper-grain" aria-hidden="true"></div>
@@ -22,7 +22,7 @@
       </header>
 
       <section class="inbox-panel" id="inboxDropzone" aria-label="收件箱文件上传区">
-        <input id="inboxFileInput" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,.gif,.url,.webloc" multiple hidden>
+        <input id="inboxFileInput" type="file" accept=".pdf,.jpg,.jpeg,.png,.webp,.gif,.url,.webloc,.md,.markdown,.txt,.docx,.pptx,.xlsx,.epub,.html,.htm,.js,.mjs,.cjs,.jsx,.ts,.tsx,.py,.java,.c,.h,.cpp,.hpp,.cs,.go,.rs,.rb,.php,.swift,.kt,.kts,.scala,.sh,.ps1,.bat,.cmd,.sql,.json,.yaml,.yml,.toml,.xml,.css,.scss,.less,.vue,.svelte,.r,.lua,.mp3,.m4a,.aac,.wav,.flac,.ogg,.opus,.wma,.zip" multiple hidden>
         <button class="inbox-drop-button" id="inboxChooseButton" type="button">
           <span class="inbox-drop-icon">＋</span>
           <span><strong>拖入收件箱</strong><small>或点击选择文件</small></span>
@@ -36,6 +36,9 @@
       <nav class="quick-nav" aria-label="快捷入口">
         <button class="nav-item" data-scope="inbox">
           <span class="nav-icon">⇩</span><span>收件箱</span><span class="nav-count inbox-count" id="inboxCount">0</span>
+        </button>
+        <button class="nav-item" data-scope="temporary-notes">
+          <span class="nav-icon">✎</span><span>临时笔记</span><span class="nav-count" id="temporaryNoteCount">0</span>
         </button>
         <button class="nav-item is-active" data-scope="all">
           <span class="nav-icon">⌂</span><span>全部资料</span><span class="nav-count" id="allCount">0</span>
@@ -133,7 +136,7 @@
             <span class="kind-stamp" id="readerKind">—</span>
             <div>
               <p id="readerTitle">选择一项资料开始阅读</p>
-              <span id="readerSubtitle">PDF、Markdown、图片和视频链接都可以在这里查看</span>
+              <span id="readerSubtitle">文档、图片、音频、压缩包和视频链接都可以在这里查看</span>
             </div>
           </div>
           <div class="reader-actions">
@@ -181,8 +184,13 @@
       <section class="notes-panel" id="notesPanel" hidden>
         <header class="notes-header">
           <div><p class="eyebrow">ANCHORED NOTES</p><h3>阅读便签</h3></div>
-          <button class="new-note-button" id="newNoteButton">＋ 新建便签</button>
+          <div class="reading-side-actions">
+            <button class="bookmark-button" id="bookmarkButton" type="button" aria-expanded="false">书签 <span id="bookmarkCount">0</span></button>
+            <button class="bookmark-button" id="newNotebookButton" type="button">＋ 笔记</button>
+            <button class="new-note-button" id="newNoteButton">＋ 便签</button>
+          </div>
         </header>
+        <section class="bookmark-popover" id="bookmarkPopover" hidden aria-label="阅读书签"></section>
         <div class="pin-hint" id="pinHint" hidden>点击正文中想要锚定的位置</div>
         <div class="notes-scroll" id="notesScroll"><div class="notes-track" id="notesTrack"></div></div>
       </section>
@@ -193,6 +201,19 @@
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <div class="move-popover" id="movePopover" hidden></div>
   <div class="move-popover folder-filter-popover" id="folderFilterPopover" hidden></div>
+  <section class="notebook-workspace" id="notebookWorkspace" hidden aria-label="笔记编辑区">
+    <div class="notebook-pane notebook-left" id="notebookLeft"></div>
+    <div class="notebook-pane notebook-right" id="notebookRight"></div>
+  </section>
+  <div class="dialog-scrim" id="noteNameDialog" hidden>
+    <form class="url-import-dialog note-name-dialog" id="noteNameForm">
+      <header><div><p class="eyebrow">NEW NOTE</p><h3>给笔记命名</h3></div><button type="button" data-note-name-cancel aria-label="关闭">×</button></header>
+      <p id="noteNameHelp">笔记将保存在临时笔记区。</p>
+      <label for="noteNameInput">笔记名称</label>
+      <input class="edit-input" id="noteNameInput" maxlength="80" placeholder="例如：工具调用设计思路" required>
+      <footer><button class="secondary-action" type="button" data-note-name-cancel>取消</button><button class="primary-action" type="submit">创建并编辑</button></footer>
+    </form>
+  </div>
   <div class="dialog-scrim" id="urlImportDialog" hidden>
     <section class="url-import-dialog" role="dialog" aria-modal="true" aria-labelledby="urlImportTitle">
       <header><div><p class="eyebrow">ADD TO INBOX</p><h3 id="urlImportTitle">导入网址</h3></div><button type="button" data-url-import-cancel aria-label="关闭导入网址">×</button></header>
@@ -203,6 +224,6 @@
       <footer><button class="secondary-action" type="button" data-url-import-cancel>取消</button><button class="primary-action" id="urlImportSubmit" type="button">加入收件箱</button></footer>
     </section>
   </div>
-  <script type="module" src="/app.js?v=38"></script>
+  <script type="module" src="/app.js?v=41"></script>
 </body>
 </html>

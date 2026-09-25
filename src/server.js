@@ -5,6 +5,7 @@ import { rename, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Library, SUPPORTED_INBOX_EXTENSIONS } from './library.js';
+import { markdownToHtml } from '../web/markdown.js';
 
 try { process.loadEnvFile('.env'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
 
@@ -16,13 +17,25 @@ const MIME_TYPES = new Map([
   ['.jpeg', 'image/jpeg'], ['.jpg', 'image/jpeg'], ['.js', 'text/javascript; charset=utf-8'],
   ['.md', 'text/markdown; charset=utf-8'], ['.pdf', 'application/pdf'], ['.png', 'image/png'],
   ['.svg', 'image/svg+xml'], ['.txt', 'text/plain; charset=utf-8'], ['.url', 'text/plain; charset=utf-8'],
-  ['.webp', 'image/webp'],
+  ['.webp', 'image/webp'], ['.mp3', 'audio/mpeg'], ['.m4a', 'audio/mp4'], ['.aac', 'audio/aac'],
+  ['.wav', 'audio/wav'], ['.flac', 'audio/flac'], ['.ogg', 'audio/ogg'], ['.opus', 'audio/ogg'],
+  ['.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+  ['.pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'],
+  ['.xlsx', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'],
+  ['.epub', 'application/epub+zip'], ['.zip', 'application/zip'],
 ]);
 
 function send(response, status, body) {
   response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   response.end(JSON.stringify(body));
 }
+
+function sendBuffer(response, status, bytes, headers = {}) {
+  response.writeHead(status, { 'content-length': bytes.length, 'cache-control': 'no-store', ...headers });
+  response.end(bytes);
+}
+
+const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
 
 async function bodyBuffer(request) {
   if (Number(request.headers['content-length'] || 0) > MAX_UPLOAD) throw new Error('Upload exceeds 32 MB');
@@ -78,7 +91,7 @@ export function createApi(library) {
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://localhost');
-      if (request.method === 'GET' && url.pathname === '/health') return send(response, 200, { status: 'ok', api_version: 10 });
+    if (request.method === 'GET' && url.pathname === '/health') return send(response, 200, { status: 'ok', api_version: 13 });
       if (request.method === 'GET' && url.pathname === '/api/library/tree') return send(response, 200, await library.tree());
       if (request.method === 'POST' && url.pathname === '/api/library/folders') {
         const payload = JSON.parse((await bodyBuffer(request)).toString('utf8'));
@@ -131,6 +144,67 @@ export function createApi(library) {
         const items = await library.items();
         return send(response, 200, url.searchParams.get('status') ? items.filter(item => item.status === url.searchParams.get('status')) : items);
       }
+      if (request.method === 'GET' && url.pathname === '/api/notebook/temporary') return send(response, 200, await library.temporaryNotes());
+      if (request.method === 'POST' && url.pathname === '/api/notebook/temporary') {
+        const payload = JSON.parse((await bodyBuffer(request)).toString('utf8'));
+        return send(response, 201, await library.createTemporaryNote(payload));
+      }
+      if (request.method === 'POST' && url.pathname === '/api/notebook/notes') {
+        const payload = JSON.parse((await bodyBuffer(request)).toString('utf8'));
+        return send(response, 201, await library.createLibraryNote(payload));
+      }
+      const notebookMatch = url.pathname.match(/^\/api\/notebook\/notes\/([0-9a-f-]{36})$/);
+      if (request.method === 'GET' && notebookMatch) {
+        const note = await library.noteContent(notebookMatch[1]);
+        return send(response, note ? 200 : 404, note || { error: 'Notebook note not found' });
+      }
+      if (request.method === 'PATCH' && notebookMatch) {
+        const payload = JSON.parse((await bodyBuffer(request)).toString('utf8'));
+        const note = await library.updateNotebookNote(notebookMatch[1], payload);
+        return send(response, note ? 200 : 404, note || { error: 'Notebook note not found' });
+      }
+      if (request.method === 'DELETE' && notebookMatch) {
+        const record = await library.noteRecord(notebookMatch[1]);
+        const removed = record?.type === 'temporary' ? await library.deleteTemporaryNote(notebookMatch[1]) : await library.deleteItem(notebookMatch[1]);
+        return send(response, removed ? 200 : 404, removed || { error: 'Notebook note not found' });
+      }
+      const notebookSubmitMatch = url.pathname.match(/^\/api\/notebook\/notes\/([0-9a-f-]{36})\/submit$/);
+      if (request.method === 'POST' && notebookSubmitMatch) {
+        const note = await library.submitTemporaryNote(notebookSubmitMatch[1]);
+        return send(response, note ? 200 : 404, note || { error: 'Temporary note not found' });
+      }
+      const notebookAssetMatch = url.pathname.match(/^\/api\/notebook\/notes\/([0-9a-f-]{36})\/assets\/([^/]+)$/);
+      if (request.method === 'GET' && notebookAssetMatch) {
+        const path = await library.notebookAsset(notebookAssetMatch[1], decodeURIComponent(notebookAssetMatch[2]));
+        return path ? sendFile(request, response, path) : send(response, 404, { error: 'Notebook image not found' });
+      }
+      const notebookAssetsMatch = url.pathname.match(/^\/api\/notebook\/notes\/([0-9a-f-]{36})\/assets$/);
+      if (request.method === 'POST' && notebookAssetsMatch) {
+        const bytes = await bodyBuffer(request);
+        if (!bytes.length) throw new Error('File is empty');
+        const asset = await library.addNotebookAsset(notebookAssetsMatch[1], safeName(url.searchParams.get('filename')), bytes);
+        return send(response, asset ? 201 : 404, asset || { error: 'Notebook note not found' });
+      }
+      const notebookZipMatch = url.pathname.match(/^\/api\/notebook\/notes\/([0-9a-f-]{36})\/export\/markdown$/);
+      if (request.method === 'GET' && notebookZipMatch) {
+        const archive = await library.notebookZip(notebookZipMatch[1]);
+        if (!archive) return send(response, 404, { error: 'Notebook note not found' });
+        return sendBuffer(response, 200, archive.bytes, { 'content-type': 'application/zip', 'content-disposition': `attachment; filename*=UTF-8''${encodeURIComponent(archive.name)}` });
+      }
+      const notebookPrintMatch = url.pathname.match(/^\/api\/notebook\/notes\/([0-9a-f-]{36})\/export\/pdf$/);
+      if (request.method === 'GET' && notebookPrintMatch) {
+        const record = await library.noteContent(notebookPrintMatch[1]);
+        if (!record) return send(response, 404, { error: 'Notebook note not found' });
+        const body = markdownToHtml(record.content, { assetUrl: name => `/api/notebook/notes/${notebookPrintMatch[1]}/assets/${encodeURIComponent(name)}` });
+        const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeHtml(record.note.title)}</title><style>body{max-width:820px;margin:40px auto;padding:0 28px;color:#222;font:16px/1.75 system-ui,"Microsoft YaHei",sans-serif}h1,h2,h3{line-height:1.3}img{max-width:100%;height:auto}pre{padding:16px;overflow:auto;background:#f3f1eb}code{font-family:ui-monospace,monospace}button{position:fixed;right:24px;top:20px;padding:10px 16px;border:0;border-radius:4px;color:white;background:#173f35}@media print{button{display:none}body{margin:0;max-width:none}}</style></head><body><button onclick="window.print()">保存为 PDF</button><article>${body}</article></body></html>`;
+        return sendBuffer(response, 200, Buffer.from(html), { 'content-type': 'text/html; charset=utf-8' });
+      }
+      const stickyConvertMatch = url.pathname.match(/^\/api\/items\/([0-9a-f-]{36})\/notes\/([0-9a-f-]{36})\/convert$/);
+      if (request.method === 'POST' && stickyConvertMatch) {
+        const payload = JSON.parse((await bodyBuffer(request)).toString('utf8'));
+        const note = await library.convertStickyNote(stickyConvertMatch[1], stickyConvertMatch[2], payload.title);
+        return send(response, note ? 201 : 404, note || { error: 'Sticky note not found' });
+      }
       const itemMatch = url.pathname.match(/^\/api\/items\/([0-9a-f-]{36})$/);
       if (request.method === 'GET' && itemMatch) {
         const item = (await library.items()).find(value => value.id === itemMatch[1]);
@@ -150,7 +224,11 @@ export function createApi(library) {
         const item = (await library.items()).find(value => value.id === contentMatch[1]);
         if (!item) return send(response, 404, { error: 'Item not found' });
         const base = item.metadata_path?.slice(0, -5);
-        const path = contentMatch[2] === 'asset' ? item.asset_path : `${base}${contentMatch[2] === 'markdown' ? '.md' : '.txt'}`;
+        let path = contentMatch[2] === 'asset' ? item.asset_path : `${base}${contentMatch[2] === 'markdown' ? '.summary.md' : '.txt'}`;
+        if (contentMatch[2] === 'markdown' && !await stat(path).catch(() => null)) {
+          const legacy = `${base}.md`;
+          if (legacy !== item.asset_path) path = legacy;
+        }
         if (!path || !within(path, [library.library, library.review])) return send(response, 404, { error: 'File not found' });
         const type = extname(path).toLowerCase() === '.html' ? 'text/plain; charset=utf-8' : undefined;
         return sendFile(request, response, path, { type });
@@ -174,6 +252,21 @@ export function createApi(library) {
       if (request.method === 'DELETE' && noteMatch) {
         const note = await library.deleteNote(noteMatch[1], noteMatch[2]);
         return send(response, note ? 200 : 404, note || { error: 'Note not found' });
+      }
+      const bookmarksMatch = url.pathname.match(/^\/api\/items\/([0-9a-f-]{36})\/bookmarks$/);
+      if (request.method === 'GET' && bookmarksMatch) {
+        const bookmarks = await library.bookmarksFor(bookmarksMatch[1]);
+        return send(response, bookmarks ? 200 : 404, bookmarks || { error: 'Item not found' });
+      }
+      if (request.method === 'POST' && bookmarksMatch) {
+        const payload = JSON.parse((await bodyBuffer(request)).toString('utf8'));
+        const bookmark = await library.addBookmark(bookmarksMatch[1], payload);
+        return send(response, bookmark ? 201 : 404, bookmark || { error: 'Item not found' });
+      }
+      const bookmarkMatch = url.pathname.match(/^\/api\/items\/([0-9a-f-]{36})\/bookmarks\/([0-9a-f-]{36})$/);
+      if (request.method === 'DELETE' && bookmarkMatch) {
+        const bookmark = await library.deleteBookmark(bookmarkMatch[1], bookmarkMatch[2]);
+        return send(response, bookmark ? 200 : 404, bookmark || { error: 'Bookmark not found' });
       }
       const actionMatch = url.pathname.match(/^\/api\/items\/([0-9a-f-]{36})\/(approve|reanalyze)$/);
       if (request.method === 'POST' && actionMatch) {
@@ -218,7 +311,7 @@ export function createApi(library) {
       if (request.method === 'POST' && url.pathname === '/api/inbox/files') {
         const name = safeName(url.searchParams.get('filename'));
         const extension = extname(name).toLowerCase();
-        if (!SUPPORTED_INBOX_EXTENSIONS.has(extension)) throw new Error('Supported uploads: PDF, JPG, PNG, WebP, GIF, URL, WEBLOC');
+        if (!SUPPORTED_INBOX_EXTENSIONS.has(extension)) throw new Error('Unsupported upload format');
         const bytes = await bodyBuffer(request);
         if (!bytes.length) throw new Error('File is empty');
         const path = await availableInboxPath(library.inbox, name);
@@ -228,7 +321,7 @@ export function createApi(library) {
         if (url.searchParams.get('defer') === '1') return send(response, 202, { status: 'pending', name: basename(path) });
         return send(response, 202, await library.enqueue(path, name));
       }
-      const staticFiles = new Map([['/', 'index.html'], ['/index.html', 'index.html'], ['/styles.css', 'styles.css'], ['/app.js', 'app.js'], ['/favicon.svg', 'favicon.svg']]);
+      const staticFiles = new Map([['/', 'index.html'], ['/index.html', 'index.html'], ['/styles.css', 'styles.css'], ['/app.js', 'app.js'], ['/markdown.js', 'markdown.js'], ['/favicon.svg', 'favicon.svg']]);
       const vendorFiles = new Map([['/vendor/pdf.mjs', 'pdf.mjs'], ['/vendor/pdf.worker.mjs', 'pdf.worker.mjs']]);
       if (request.method === 'GET' && vendorFiles.has(url.pathname)) {
         return sendFile(request, response, join(PDFJS_ROOT, vendorFiles.get(url.pathname)), { type: 'text/javascript; charset=utf-8', cache: 'public, max-age=86400' });
@@ -238,7 +331,7 @@ export function createApi(library) {
       }
       send(response, 404, { error: 'Route not found' });
     } catch (error) {
-      send(response, error instanceof SyntaxError || error instanceof TypeError || /^Only |^Supported |^File |^Upload |^quality_score|^tags |^published_at|^corrected_text|^favorite |^reading_|^last_opened|^Add |^Unsupported |^Item update|^Move or |^Correction |^Folder |^Parent folder|^Invalid note|^Invalid inbox|^Cannot delete|^Note content|^Saved view|^Relation |^Related item|^Category |^Restructure |^Select at least|^Selected folders|^Target folder|^This move|^This structure/.test(error.message) ? 400 : 500, { error: error.message });
+      send(response, error instanceof SyntaxError || error instanceof TypeError || /^Only |^Supported |^File |^Upload |^quality_score|^tags |^published_at|^corrected_text|^favorite |^reading_|^last_opened|^Add |^Unsupported |^Item update|^Move or |^Correction |^Folder |^Parent folder|^Invalid note|^Invalid bookmark|^Bookmark name|^Invalid inbox|^Invalid notebook|^Notebook |^Empty notes|^Bound item|^Cannot delete|^Note content|^Saved view|^Relation |^Related item|^Category |^Restructure |^Select at least|^Selected folders|^Target folder|^This move|^This structure/.test(error.message) ? 400 : 500, { error: error.message });
     }
   });
 }

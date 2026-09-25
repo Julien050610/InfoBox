@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { extractHtml, extractPdf } from '../src/extract.js';
+import { ZipFile } from 'yazl';
+import { extractFile, extractHtml, extractPdf } from '../src/extract.js';
 import { analyzeContent, decideWithJev } from '../src/models.js';
 import { Library } from '../src/library.js';
 import { createApi } from '../src/server.js';
@@ -26,6 +27,28 @@ function samplePdf() {
   const xref = Buffer.byteLength(source);
   source += `xref\n0 6\n0000000000 65535 f \n${offsets.slice(1).map(offset => `${String(offset).padStart(10, '0')} 00000 n \n`).join('')}trailer\n<< /Size 6 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF`;
   return Buffer.from(source);
+}
+
+function zipBuffer(entries) {
+  const archive = new ZipFile();
+  for (const [name, value] of Object.entries(entries)) archive.addBuffer(Buffer.from(value), name);
+  archive.end();
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    archive.outputStream.on('data', chunk => chunks.push(chunk));
+    archive.outputStream.on('error', reject);
+    archive.outputStream.on('end', () => resolve(Buffer.concat(chunks)));
+  });
+}
+
+function sampleWav() {
+  const samples = Buffer.alloc(8000);
+  const header = Buffer.alloc(44);
+  header.write('RIFF', 0); header.writeUInt32LE(36 + samples.length, 4); header.write('WAVEfmt ', 8);
+  header.writeUInt32LE(16, 16); header.writeUInt16LE(1, 20); header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(8000, 24); header.writeUInt32LE(8000, 28); header.writeUInt16LE(1, 32); header.writeUInt16LE(8, 34);
+  header.write('data', 36); header.writeUInt32LE(samples.length, 40);
+  return Buffer.concat([header, samples]);
 }
 
 async function waitForJob(base, id) {
@@ -52,6 +75,71 @@ test('extracts article text, video metadata, and PDF text', async () => {
   assert.equal(structuredVideo.publishedAt, '2026-09-01');
   const pdf = await extractPdf(samplePdf());
   assert.match(pdf.text, /Agent Harness Design/);
+});
+
+test('extracts text from office, ebook, HTML, code, and archive files', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'infobox-formats-'));
+  const files = {
+    'note.md': '# Agent Notes\nTool calling and memory.',
+    'page.html': '<html><head><title>Local Article</title></head><body><article><p>This local article explains plasma control with reinforcement learning in enough detail.</p></article></body></html>',
+    'agent.py': 'def choose_tool(state):\n    return state["next_tool"]',
+    'paper.docx': await zipBuffer({ 'word/document.xml': '<w:document xmlns:w="w"><w:body><w:p><w:r><w:t>Document agent harness</w:t></w:r></w:p></w:body></w:document>' }),
+    'slides.pptx': await zipBuffer({ 'ppt/slides/slide1.xml': '<p:sld xmlns:p="p" xmlns:a="a"><a:p><a:r><a:t>Plasma control slide</a:t></a:r></a:p></p:sld>' }),
+    'table.xlsx': await zipBuffer({
+      'xl/sharedStrings.xml': '<sst><si><t>Reinforcement learning</t></si></sst>',
+      'xl/worksheets/sheet1.xml': '<worksheet><sheetData><row><c r="A1" t="s"><v>0</v></c><c r="B1"><v>42</v></c></row></sheetData></worksheet>',
+    }),
+    'book.epub': await zipBuffer({
+      'META-INF/container.xml': '<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>',
+      'OEBPS/content.opf': '<package xmlns:dc="dc"><metadata><dc:title>Agent Book</dc:title></metadata><manifest><item id="c1" href="chapter.xhtml"/></manifest><spine><itemref idref="c1"/></spine></package>',
+      'OEBPS/chapter.xhtml': '<html><body><h1>Agent systems</h1><p>Tools, memory and planning.</p></body></html>',
+    }),
+    'bundle.zip': await zipBuffer({ 'Computer Science/Agent/readme.md': 'ignored body', 'Computer Science/Agent/tool.js': 'ignored body' }),
+  };
+  try {
+    for (const [name, value] of Object.entries(files)) await writeFile(join(root, name), value);
+    const results = Object.fromEntries(await Promise.all(Object.keys(files).map(async name => [name, await extractFile(join(root, name))])));
+    assert.equal(results['note.md'].kind, 'markdown');
+    assert.match(results['note.md'].text, /Tool calling/);
+    assert.equal(results['page.html'].kind, 'article');
+    assert.match(results['page.html'].text, /plasma control/);
+    assert.equal(results['agent.py'].kind, 'code');
+    assert.match(results['agent.py'].text, /choose_tool/);
+    assert.match(results['paper.docx'].text, /Document agent harness/);
+    assert.match(results['slides.pptx'].text, /Plasma control slide/);
+    assert.match(results['table.xlsx'].text, /A1: Reinforcement learning/);
+    assert.equal(results['book.epub'].title, 'Agent Book');
+    assert.match(results['book.epub'].text, /Tools, memory and planning/);
+    assert.equal(results['bundle.zip'].kind, 'archive');
+    assert.match(results['bundle.zip'].text, /Computer Science\/Agent\/tool\.js/);
+    assert.doesNotMatch(results['bundle.zip'].text, /ignored body/);
+  } finally {
+    if (!root.startsWith(join(tmpdir(), 'infobox-formats-'))) throw new Error('Unsafe test cleanup path');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('audio goes directly to review without calling the analysis model', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'infobox-audio-'));
+  let analysisCalls = 0;
+  const library = new Library({ root, analyze: async () => { analysisCalls += 1; throw new Error('must not run'); } });
+  await library.init({ watchInbox: false });
+  try {
+    const path = join(root, 'inbox', 'meeting.wav');
+    await writeFile(path, sampleWav());
+    const job = await library.enqueue(path);
+    await library.chain;
+    const item = (await library.items()).find(value => value.id === job.id);
+    assert.equal(analysisCalls, 0);
+    assert.equal(item.kind, 'audio');
+    assert.equal(item.status, 'review');
+    assert.equal(item.summary_basis, 'audio_metadata');
+    assert.match(item.review_reason, /未转写/);
+  } finally {
+    library.close();
+    if (!root.startsWith(join(tmpdir(), 'infobox-audio-'))) throw new Error('Unsafe test cleanup path');
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('Jev selects bounded category and tags and flags uncertainty', async () => {
@@ -148,17 +236,29 @@ test('uploads, files, deduplicates, and updates manual quality score', async () 
     assert.equal((await (await fetch(`${base}/api/items/${items[0].id}/notes`)).json()).length, 1);
     assert.equal((await fetch(`${base}/api/items/${items[0].id}/notes/${anchoredNote.id}`, { method: 'DELETE' })).status, 200);
     assert.equal((await (await fetch(`${base}/api/items/${items[0].id}/notes`)).json()).length, 0);
+    const createBookmark = await fetch(`${base}/api/items/${items[0].id}/bookmarks`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: '实验方法', anchor: { type: 'pdf', page: 2, x: 0.5, y: 0.35, view: 'asset' } }) });
+    assert.equal(createBookmark.status, 201);
+    const bookmark = await createBookmark.json();
+    assert.equal(bookmark.name, '实验方法');
+    assert.equal(bookmark.anchor.page, 2);
+    assert.equal(bookmark.anchor.view, 'asset');
+    assert.equal((await (await fetch(`${base}/api/items/${items[0].id}/bookmarks`)).json()).length, 1);
+    const invalidBookmark = await fetch(`${base}/api/items/${items[0].id}/bookmarks`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: '', anchor: { type: 'document', x: 0.5, y: 0.2 } }) });
+    assert.equal(invalidBookmark.status, 400);
+    assert.equal((await fetch(`${base}/api/items/${items[0].id}/bookmarks/${bookmark.id}`, { method: 'DELETE' })).status, 200);
+    assert.equal((await (await fetch(`${base}/api/items/${items[0].id}/bookmarks`)).json()).length, 0);
     const workbench = await fetch(base);
     assert.match(await workbench.text(), /InfoBox/);
     const health = await (await fetch(`${base}/health`)).json();
-    assert.equal(health.api_version, 10);
+  assert.equal(health.api_version, 13);
     const pdfRuntime = await fetch(`${base}/vendor/pdf.mjs`);
     assert.equal(pdfRuntime.status, 200);
     assert.match(await pdfRuntime.text(), /getDocument/);
-    const patch = await fetch(`${base}/api/items/${items[0].id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ quality_score: 4 }) });
+    const patch = await fetch(`${base}/api/items/${items[0].id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ quality_score: 4, reading_position: { type: 'pdf', page: 3, x: 0.5, y: 0.24, view: 'asset' } }) });
     assert.equal(patch.status, 200);
     assert.equal((await patch.json()).quality_score, 4);
-    assert.match(await readFile(items[0].metadata_path.slice(0, -5) + '.md', 'utf8'), /内容质量：4\/5/);
+    assert.deepEqual((await library.items()).find(item => item.id === items[0].id).reading_position, { type: 'pdf', page: 3, x: 0.5, y: 0.24, view: 'asset' });
+    assert.match(await readFile(items[0].metadata_path.slice(0, -5) + '.summary.md', 'utf8'), /内容质量：4\/5/);
     const previousAssetPath = items[0].asset_path;
     const edit = await fetch(`${base}/api/items/${items[0].id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: 'Agent-Harness-Updated', summary: '更新后的摘要。', tags: ['agent', 'edited'] }) });
     assert.equal(edit.status, 200);
@@ -168,7 +268,7 @@ test('uploads, files, deduplicates, and updates manual quality score', async () 
     const refreshed = (await library.items()).find(item => item.id === items[0].id);
     assert.match(refreshed.asset_path, /2026-09-Agent-Harness-Updated\.png$/);
     assert.equal(await stat(previousAssetPath).then(() => true, () => false), false);
-    assert.match(await readFile(refreshed.metadata_path.slice(0, -5) + '.md', 'utf8'), /更新后的摘要/);
+    assert.match(await readFile(refreshed.metadata_path.slice(0, -5) + '.summary.md', 'utf8'), /更新后的摘要/);
     const second = await upload();
     assert.equal((await waitForJob(base, second.id)).status, 'review');
     const review = (await library.items()).find(item => item.id === second.id);
@@ -409,7 +509,7 @@ test('creates two-level folders and moves a ready item between them', async () =
     assert.match(moved.asset_path, /library[\\/]Computer Science[\\/]强化学习[\\/]2026-09-强化学习导论\.pdf$/);
     await stat(moved.asset_path);
     assert.equal(await stat(originalAsset).then(() => true, () => false), false);
-    assert.match(await readFile(moved.asset_path.slice(0, -4) + '.md', 'utf8'), /主分类：Computer Science\/强化学习/);
+    assert.match(await readFile(moved.asset_path.slice(0, -4) + '.summary.md', 'utf8'), /主分类：Computer Science\/强化学习/);
 
     const afterMove = await (await fetch(`${base}/api/library/tree`)).json();
     const computerScience = afterMove.children.find(node => node.path === 'Computer Science');
@@ -557,13 +657,81 @@ test('supports deep folders and snapshot rollback without moving later items', a
   }
 });
 
+test('creates temporary notes, preserves pasted images, and classifies them through the inbox', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'infobox-notebook-'));
+  const library = new Library({ root,
+    analyze: async extracted => ({ title: 'Agent-工具笔记', summary: '记录工具调用设计。', category: 'AI/Agent', tags: ['agent', 'tool-calling'], published_at: null, needs_review: false, review_reason: '', provider: 'test' }),
+    decide: async (_, analysis) => ({ category: analysis.category, tags: analysis.tags, needs_review: false, provider: 'test' }),
+  });
+  await library.init({ watchInbox: false });
+  const server = createApi(library);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const created = await (await fetch(`${base}/api/notebook/temporary`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title: '工具草稿' }) })).json();
+    const image = await (await fetch(`${base}/api/notebook/notes/${created.id}/assets?filename=diagram.png`, { method: 'POST', body: Buffer.from('image') })).json();
+    assert.match(image.markdown, /assets\/diagram\.png/);
+    const content = `# 工具调用\n\n${image.markdown}\n\nAgent 使用工具完成任务。`;
+    assert.equal((await fetch(`${base}/api/notebook/notes/${created.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ content }) })).status, 200);
+    assert.equal((await fetch(`${base}/api/notebook/notes/${created.id}/submit`, { method: 'POST' })).status, 200);
+    const inbox = await (await fetch(`${base}/api/inbox`)).json();
+    assert.equal(inbox[0].inbox_kind, 'note');
+    const queued = await (await fetch(`${base}/api/inbox/process`, { method: 'POST' })).json();
+    assert.equal(queued.jobs.length, 1);
+    assert.equal((await waitForJob(base, queued.jobs[0].id)).status, 'ready');
+    const item = (await library.items()).find(value => value.id === created.id);
+    assert.equal(item.kind, 'note');
+    assert.equal(item.category, 'AI/Agent');
+    assert.equal(await readFile(item.asset_path, 'utf8'), content);
+    await stat(item.metadata_path.slice(0, -5) + '.assets/diagram.png');
+    const archive = await fetch(`${base}/api/notebook/notes/${item.id}/export/markdown`);
+    assert.equal(archive.status, 200);
+    assert.equal(Buffer.from(await archive.arrayBuffer()).subarray(0, 2).toString(), 'PK');
+    const print = await fetch(`${base}/api/notebook/notes/${item.id}/export/pdf`);
+    assert.match(await print.text(), /保存为 PDF/);
+  } finally {
+    library.close();
+    await new Promise(resolve => server.close(resolve));
+    if (!root.startsWith(join(tmpdir(), 'infobox-notebook-'))) throw new Error('Unsafe test cleanup path');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('bound notes follow their source and return to the inbox when the source is deleted', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'infobox-bound-note-'));
+  const library = new Library({ root });
+  await library.init({ watchInbox: false });
+  try {
+    const sourceId = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+    const sourceFolder = join(root, 'library', 'AI');
+    await mkdir(sourceFolder, { recursive: true });
+    const sourceAsset = join(sourceFolder, 'source.pdf');
+    await writeFile(sourceAsset, 'pdf');
+    await writeFile(join(sourceFolder, 'source.json'), JSON.stringify({ id: sourceId, title: 'Source', category: 'AI', tags: [], status: 'ready', kind: 'pdf', summary: '', quality_score: null, published_at: null, received_at: '2026-09-25', asset_path: sourceAsset, original_name: 'source.pdf' }));
+    const note = await library.createLibraryNote({ title: '绑定笔记', content: '锚定内容', bound_item_id: sourceId, anchor: { type: 'pdf', page: 1, x: .5, y: .4 } });
+    await library.patchItem(sourceId, { category: 'Computer Science/AI' });
+    const moved = (await library.items()).find(value => value.id === note.id);
+    assert.equal(moved.category, 'Computer Science/AI');
+    assert.match(moved.asset_path, /Computer Science[\\/]AI/);
+    await library.deleteItem(sourceId);
+    assert.equal((await library.items()).some(value => value.id === note.id), false);
+    const inbox = await library.inboxFiles();
+    assert.equal(inbox.find(value => value.note_id === note.id).inbox_kind, 'note');
+    assert.equal((await library.noteContent(note.id)).content, '锚定内容');
+  } finally {
+    library.close();
+    if (!root.startsWith(join(tmpdir(), 'infobox-bound-note-'))) throw new Error('Unsafe test cleanup path');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('one-shot run handles current inbox and exits without a watcher', async () => {
   const root = await mkdtemp(join(tmpdir(), 'infobox-test-'));
   const inbox = join(root, 'inbox');
   await mkdir(inbox);
   await writeFile(join(inbox, 'first.png'), 'first image');
   await writeFile(join(inbox, 'second.png'), 'second image');
-  await writeFile(join(inbox, 'ignored.txt'), 'leave this alone');
+  await writeFile(join(inbox, 'ignored.eml'), 'leave this alone');
   const library = new Library({ root,
     analyze: async () => ({ title: 'Image-Note', summary: '一张图片。', category: 'Images', tags: ['image'], published_at: null, needs_review: false, review_reason: '' }),
     decide: async (_, analysis) => ({ category: analysis.category, tags: analysis.tags, needs_review: false, provider: 'test' }),
@@ -572,9 +740,9 @@ test('one-shot run handles current inbox and exits without a watcher', async () 
     const { results, skipped } = await processInbox(library);
     assert.equal(results.length, 2);
     assert.ok(results.every(job => job.status === 'ready'));
-    assert.deepEqual(skipped, ['ignored.txt']);
+    assert.deepEqual(skipped, ['ignored.eml']);
     assert.equal(library.watcher, null);
-    assert.equal((await readFile(join(inbox, 'ignored.txt'), 'utf8')), 'leave this alone');
+    assert.equal((await readFile(join(inbox, 'ignored.eml'), 'utf8')), 'leave this alone');
   } finally {
     library.close();
     if (!root.startsWith(join(tmpdir(), 'infobox-test-'))) throw new Error('Unsafe test cleanup path');

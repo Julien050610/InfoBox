@@ -1,10 +1,12 @@
 import { getDocument, GlobalWorkerOptions } from '/vendor/pdf.mjs';
+import { markdownToHtml as renderMarkdownHtml } from '/markdown.js';
 
 GlobalWorkerOptions.workerSrc = '/vendor/pdf.worker.mjs';
 
 const state = {
   items: [],
   inboxFiles: [],
+  temporaryNotes: [],
   inboxAvailable: null,
   backendCompatible: null,
   tree: null,
@@ -40,12 +42,28 @@ const state = {
   tab: 'asset',
   renderToken: 0,
   collapsedFolders: new Set(),
+  folderCollapseInitialized: false,
   sidebarCollapsed: false,
   readingMode: false,
   pinning: false,
+  notebookPinning: false,
+  pendingNotebookAnchor: null,
+  pendingNoteCreate: null,
+  boundNotebookNotes: [],
+  activeNotebook: null,
+  notebookContent: '',
+  notebookPreview: false,
+  notebookSaveTimer: null,
+  notebookReaderPlaceholder: null,
+  readingPositionTimer: null,
+  restoringReadingPosition: false,
   notes: [],
   notesItemId: null,
   noteSaveTimers: new Map(),
+  bookmarks: [],
+  bookmarksOpen: false,
+  bookmarkNaming: false,
+  pendingBookmarkAnchor: null,
   updatePdfPage: null,
   uploadingInbox: false,
   processingInbox: false,
@@ -58,6 +76,7 @@ const elements = {
   workspace: document.querySelector('#workspace'),
   sidebarToggle: document.querySelector('#sidebarToggle'),
   inboxCount: document.querySelector('#inboxCount'),
+  temporaryNoteCount: document.querySelector('#temporaryNoteCount'),
   inboxDropzone: document.querySelector('#inboxDropzone'),
   inboxFileInput: document.querySelector('#inboxFileInput'),
   inboxChooseButton: document.querySelector('#inboxChooseButton'),
@@ -81,6 +100,7 @@ const elements = {
   collectionTitle: document.querySelector('#collectionTitle'),
   search: document.querySelector('#searchInput'),
   contentColumn: document.querySelector('.content-column'),
+  reader: document.querySelector('.reader'),
   backButton: document.querySelector('#backButton'),
   forwardButton: document.querySelector('#forwardButton'),
   filterButton: document.querySelector('#filterButton'),
@@ -112,20 +132,35 @@ const elements = {
   inspector: document.querySelector('#inspectorContent'),
   notesPanel: document.querySelector('#notesPanel'),
   newNoteButton: document.querySelector('#newNoteButton'),
+  newNotebookButton: document.querySelector('#newNotebookButton'),
+  bookmarkButton: document.querySelector('#bookmarkButton'),
+  bookmarkCount: document.querySelector('#bookmarkCount'),
+  bookmarkPopover: document.querySelector('#bookmarkPopover'),
   pinHint: document.querySelector('#pinHint'),
   notesScroll: document.querySelector('#notesScroll'),
   notesTrack: document.querySelector('#notesTrack'),
   noteLines: document.querySelector('#noteLines'),
   anchorMarkers: document.querySelector('#anchorMarkers'),
+  notebookWorkspace: document.querySelector('#notebookWorkspace'),
+  notebookLeft: document.querySelector('#notebookLeft'),
+  notebookRight: document.querySelector('#notebookRight'),
+  noteNameDialog: document.querySelector('#noteNameDialog'),
+  noteNameForm: document.querySelector('#noteNameForm'),
+  noteNameInput: document.querySelector('#noteNameInput'),
+  noteNameHelp: document.querySelector('#noteNameHelp'),
   statusDot: document.querySelector('#statusDot'),
   connectionStatus: document.querySelector('#connectionStatus'),
   toast: document.querySelector('#toast'),
 };
 
-const kindNames = { pdf: 'PDF', image: '图片', video: '视频', article: '网页', unknown: '文件' };
+const kindNames = {
+  pdf: 'PDF', image: '图片', video: '视频', article: '网页', markdown: 'Markdown', text: '文本', code: '代码',
+  document: '文档', presentation: '演示文稿', spreadsheet: '表格', ebook: '电子书', audio: '音频', archive: '压缩包', unknown: '文件',
+  note: '笔记',
+};
 const basisNames = {
   full_text: '提取的正文', title_description: '标题与简介', title_only: '仅标题',
-  image: '图片内容', manual_correction: '人工校正文本', unavailable: '未提取',
+  image: '图片内容', audio_metadata: '音频元数据', archive_listing: '压缩包文件清单', manual_correction: '人工校正文本', unavailable: '未提取',
 };
 const readingNames = { unread: '未读', reading: '阅读中', read: '已读' };
 const relationNames = { related: '相关', cites: '引用', supports: '支持', contradicts: '反驳', follow_up: '后续研究' };
@@ -287,6 +322,18 @@ function libraryCreateMenuHtml() {
   </div>`;
 }
 
+function initializeCollapsedFolders() {
+  if (state.folderCollapseInitialized || !state.tree) return;
+  const paths = [''];
+  const collect = nodes => nodes.forEach(node => {
+    paths.push(node.path);
+    collect(node.children || []);
+  });
+  collect(state.tree.children || []);
+  state.collapsedFolders = new Set(paths);
+  state.folderCollapseInitialized = true;
+}
+
 function structureSelectionState(path) {
   const direct = state.selectedStructureFolders.has(path);
   const locked = [...state.selectedStructureFolders].some(value => value !== path && (!value || path.startsWith(`${value}/`)));
@@ -307,6 +354,7 @@ function treeHtml(nodes, depth = 1) {
           <span class="node-name">${escapeHtml(node.name)}</span><span class="node-count">${node.count}</span>
           ${state.restructureSelecting ? `<span class="restructure-checkbox ${selection.checked ? 'is-checked' : ''} ${selection.locked ? 'is-locked' : ''}" role="checkbox" aria-checked="${selection.checked}" data-restructure-folder="${escapeHtml(node.path)}">${selection.checked ? '✓' : ''}</span>` : ''}
         </button>
+        ${!state.restructureSelecting ? `<button class="tree-note-action" type="button" data-new-note-category="${escapeHtml(node.path)}" aria-label="在 ${escapeHtml(node.name)} 中新建笔记" title="新建笔记">✎</button>` : ''}
         ${folderAddButton(node.path, node.name)}
       </div>
       ${!collapsed ? `<div class="tree-children ${hasChildren ? '' : 'is-empty'}" role="group">${folderCreatorHtml(node.path, depth + 1)}${treeHtml(node.children || [], depth + 1)}</div>` : ''}
@@ -326,6 +374,7 @@ function libraryRootHtml() {
           <span class="node-name">Library</span><span class="node-count">${state.tree?.count || 0}</span>
           ${state.restructureSelecting ? `<span class="restructure-checkbox ${selection.checked ? 'is-checked' : ''}" role="checkbox" aria-checked="${selection.checked}" data-restructure-folder="">${selection.checked ? '✓' : ''}</span>` : ''}
         </button>
+        ${!state.restructureSelecting ? '<button class="tree-note-action" type="button" data-new-temporary-note aria-label="在 Library 中新建笔记" title="新建笔记">✎</button>' : ''}
         ${folderAddButton('', 'Library')}
       </div>
       ${libraryCreateMenuHtml()}
@@ -339,6 +388,7 @@ function renderNavigation() {
   const supportedInboxCount = state.inboxFiles.filter(file => file.supported).length;
   elements.allCount.textContent = state.items.length;
   elements.inboxCount.textContent = inboxCount;
+  elements.temporaryNoteCount.textContent = state.temporaryNotes.length;
   elements.recentCount.textContent = state.items.filter(isRecent).length;
   elements.reviewCount.textContent = state.items.filter(item => item.status === 'review').length;
   elements.favoriteCount.textContent = state.items.filter(item => item.favorite).length;
@@ -530,7 +580,7 @@ function findFolderNode(path, nodes = state.tree?.children || []) {
 }
 
 function itemRowHtml(item) {
-  return `<div class="item-row file-browser-row ${item.id === state.selectedId ? 'is-active' : ''}" data-id="${item.id}" tabindex="0">
+  return `<div class="item-row file-browser-row ${item.kind === 'note' ? 'notebook-row' : ''} ${item.id === state.selectedId ? 'is-active' : ''}" data-id="${item.id}" tabindex="0">
     <span class="item-type ${typeClass(item)}">${escapeHtml(kindNames[item.kind] || 'FILE')}</span>
     <span class="item-title">
       <strong>${item.favorite ? '<span class="item-favorite">★</span>' : ''}${escapeHtml(item.title)}</strong>
@@ -553,9 +603,21 @@ function folderRowHtml(folder) {
 }
 
 function renderList() {
+  if (state.scope === 'temporary-notes') {
+    const query = state.query.trim().toLocaleLowerCase('zh-CN');
+    const notes = query ? state.temporaryNotes.filter(note => note.title.toLocaleLowerCase('zh-CN').includes(query)) : state.temporaryNotes;
+    state.selectedId = null;
+    elements.collectionTitle.textContent = '临时笔记';
+    elements.collectionPath.textContent = 'NOTE DRAFTS';
+    elements.resultCount.textContent = `${notes.length} 篇草稿`;
+    elements.list.closest('.catalog')?.querySelector('.catalog-hint')?.replaceChildren(document.createTextNode('完成后可手动送入收件箱分类'));
+    elements.contentColumn.classList.remove('is-folder-browser');
+    elements.list.innerHTML = `<button class="temporary-note-create" type="button" data-new-temporary-note>＋ 新建临时笔记</button>${notes.map(note => `<div class="item-row notebook-row" data-open-notebook="${note.id}" tabindex="0"><span class="item-type note">笔</span><span class="item-title"><strong>${escapeHtml(note.title)}</strong><small>临时草稿 · ${new Date(note.updated_at).toLocaleString('zh-CN')}</small></span><span class="item-tags"><span class="mini-tag">Markdown</span></span><span class="item-date">编辑 ›</span><span></span></div>`).join('') || '<div class="empty-list">还没有临时笔记</div>'}`;
+    return;
+  }
   if (state.scope === 'inbox') {
     const query = state.query.trim().toLocaleLowerCase('zh-CN');
-    const files = query ? state.inboxFiles.filter(file => file.name.toLocaleLowerCase('zh-CN').includes(query)) : state.inboxFiles;
+    const files = query ? state.inboxFiles.filter(file => (file.display_name || file.name).toLocaleLowerCase('zh-CN').includes(query)) : state.inboxFiles;
     state.selectedId = null;
     elements.collectionTitle.textContent = '收件箱';
     elements.collectionPath.textContent = 'PENDING INBOX';
@@ -565,10 +627,10 @@ function renderList() {
       <div class="item-row inbox-file-row">
         <span class="item-type">${escapeHtml(inboxType(file))}</span>
         <span class="item-title">
-          <strong>${escapeHtml(file.name)}</strong>
+          <strong>${escapeHtml(file.display_name || file.name)}</strong>
           <small>${file.supported ? file.processing ? '正在分类' : '等待分类' : '暂不支持此格式'}</small>
         </span>
-        <span class="item-tags"><span class="mini-tag">${escapeHtml(formatBytes(file.size))}</span></span>
+        <span class="item-tags"><span class="mini-tag">${file.size == null ? '笔记草稿' : escapeHtml(formatBytes(file.size))}</span></span>
         <span class="item-date inbox-row-actions ${file.supported ? '' : 'review-badge'}">
           <span>${file.supported ? '收件箱' : '需移除'}</span>
           <button class="inbox-delete-button" type="button" data-inbox-delete="${escapeHtml(file.name)}" aria-label="删除 ${escapeHtml(file.name)}" ${file.processing ? 'disabled' : ''}>×</button>
@@ -601,9 +663,18 @@ function graphData() {
   const matchedItems = filteredItems();
   const matchingIds = new Set(matchedItems.map(item => item.id));
   const filtering = Boolean(state.query.trim() || activeFilterCount());
-  const items = filtering
+  let items = filtering
     ? [...matchedItems, ...scopedItems().filter(item => !matchingIds.has(item.id))].slice(0, 100)
     : matchedItems.slice(0, 100);
+  const allItemsById = new Map(state.items.map(item => [item.id, item]));
+  const includedIds = new Set(items.map(item => item.id));
+  for (const note of [...items]) {
+    if (!note.bound_item_id || includedIds.has(note.bound_item_id)) continue;
+    const source = allItemsById.get(note.bound_item_id);
+    if (source?.status !== 'ready') continue;
+    items.push(source);
+    includedIds.add(source.id);
+  }
   const palette = ['#2f7668', '#bd7047', '#607db0', '#9a7a32', '#7d6098', '#64854b'];
   const nodes = [{ id: 'root', type: 'root', label: 'Library', depth: 0, color: '#173f35' }];
   const edges = [];
@@ -629,12 +700,26 @@ function graphData() {
   };
   const addTreeFolders = nodesToAdd => nodesToAdd.forEach(node => { addFolderPath(node.path); addTreeFolders(node.children || []); });
   addTreeFolders(state.tree?.children || []);
+  const boundNotes = [];
   for (const item of items) {
+    if (item.kind === 'note' && item.bound_item_id) {
+      boundNotes.push(item);
+      continue;
+    }
     const parts = String(item.category || '未分类').split('/').filter(Boolean).length ? String(item.category || '未分类').split('/').filter(Boolean) : ['未分类'];
     const topPath = parts[0];
     const parent = addFolderPath(parts.join('/'));
     nodes.push({ id: item.id, type: 'item', label: item.title, item, topPath, depth: parts.length + 1 });
     edges.push({ source: parent, target: item.id, type: 'structure' });
+  }
+  for (const item of boundNotes) {
+    const sourceNode = nodes.find(node => node.id === item.bound_item_id);
+    const parts = String(item.category || '未分类').split('/').filter(Boolean).length ? String(item.category || '未分类').split('/').filter(Boolean) : ['未分类'];
+    const topPath = sourceNode?.topPath || parts[0];
+    const fallbackParent = addFolderPath(parts.join('/'));
+    const parent = sourceNode?.id || fallbackParent;
+    nodes.push({ id: item.id, type: 'item', label: item.title, item, topPath, depth: sourceNode ? sourceNode.depth + 1 : parts.length + 1 });
+    edges.push({ source: parent, target: item.id, type: 'structure', label: sourceNode ? '锚定笔记' : '文件夹层级' });
   }
   const colors = new Map(topFolders.map((folder, index) => [folder, palette[index % palette.length]]));
   nodes.forEach(node => { if (node.type !== 'root') node.color = colors.get(node.topPath) || palette[0]; });
@@ -684,6 +769,7 @@ function renderGraph() {
   if (filtering) for (const item of items) {
     if (!matchingIds.has(item.id)) continue;
     filterIds.add(item.id);
+    if (item.kind === 'note' && item.bound_item_id) filterIds.add(item.bound_item_id);
     const parts = String(item.category || '未分类').split('/').filter(Boolean);
     parts.forEach((_, index) => filterIds.add(`folder:${parts.slice(0, index + 1).join('/')}`));
   }
@@ -820,13 +906,14 @@ function focusGraphNode(id, selectedId = null) {
 function openGraphItem(id) {
   state.selectedId = id;
   state.graphFocusId = id;
-  state.tab = 'asset';
+  state.tab = state.items.find(item => item.id === id)?.reading_position?.view || 'asset';
   state.notes = [];
   state.notesItemId = null;
   setGraphMode(false);
   render();
   pushNavigation();
   const item = selectedItem();
+  if (item?.kind === 'note') return openNotebook(item.id);
   if (item?.reading_status === 'unread') patchOrganization({ reading_status: 'reading', last_opened_at: new Date().toISOString() });
 }
 
@@ -848,24 +935,6 @@ function selectedItem() {
   return state.items.find(item => item.id === state.selectedId) || null;
 }
 
-function markdownToHtml(markdown) {
-  const lines = String(markdown).replace(/\r/g, '').split('\n');
-  const result = [];
-  let listOpen = false;
-  const closeList = () => { if (listOpen) { result.push('</ul>'); listOpen = false; } };
-  for (const source of lines) {
-    const line = escapeHtml(source);
-    if (/^### /.test(source)) { closeList(); result.push(`<h3>${line.slice(4)}</h3>`); }
-    else if (/^## /.test(source)) { closeList(); result.push(`<h2>${line.slice(3)}</h2>`); }
-    else if (/^# /.test(source)) { closeList(); result.push(`<h1>${line.slice(2)}</h1>`); }
-    else if (/^- /.test(source)) { if (!listOpen) { result.push('<ul>'); listOpen = true; } result.push(`<li>${line.slice(2)}</li>`); }
-    else if (!source.trim()) closeList();
-    else { closeList(); result.push(`<p>${line}</p>`); }
-  }
-  closeList();
-  return result.join('');
-}
-
 async function textPreview(item, variant, token) {
   const response = await fetch(`/api/items/${item.id}/${variant}`);
   if (token !== state.renderToken) return;
@@ -875,7 +944,8 @@ async function textPreview(item, variant, token) {
   }
   const text = await response.text();
   if (token !== state.renderToken) return;
-  elements.viewer.innerHTML = `<article class="document-page">${variant === 'markdown' ? markdownToHtml(text) : `<p>${escapeHtml(text)}</p>`}</article>`;
+  elements.viewer.innerHTML = `<article class="document-page">${variant === 'markdown' ? renderMarkdownHtml(text) : `<p>${escapeHtml(text)}</p>`}</article>`;
+  await restoreReadingPosition(item, token);
   requestAnimationFrame(layoutNotes);
 }
 
@@ -977,6 +1047,7 @@ async function pdfPreview(item, token) {
       await buildPages(pageNumber);
     });
     await buildPages();
+    await restoreReadingPosition(item, token);
   } catch (error) {
     if (token !== state.renderToken) return;
     elements.viewer.innerHTML = `<div class="error-state"><p>PDF 暂时无法显示</p><span>${escapeHtml(error.message)}</span></div>`;
@@ -1000,11 +1071,20 @@ async function renderViewer() {
   const item = selectedItem();
   const token = ++state.renderToken;
   state.updatePdfPage = null;
-  elements.readingToggle.disabled = state.scope === 'inbox';
+  elements.readingToggle.disabled = state.scope === 'inbox' || state.scope === 'temporary-notes';
   document.querySelectorAll('.tab').forEach(tab => {
     tab.classList.toggle('is-active', tab.dataset.tab === state.tab);
-    tab.disabled = state.scope === 'inbox';
+    tab.disabled = state.scope === 'inbox' || state.scope === 'temporary-notes';
   });
+  if (state.scope === 'temporary-notes') {
+    elements.readerKind.textContent = 'NOTE';
+    elements.readerTitle.textContent = '临时笔记区';
+    elements.readerSubtitle.textContent = '草稿保存在本地，完成后由你送入收件箱';
+    elements.openOriginal.classList.add('is-disabled');
+    elements.openOriginal.removeAttribute('href');
+    elements.viewer.innerHTML = '<div class="viewer-empty"><div class="empty-glyph">笔</div><p>选择草稿继续编辑</p><span>支持 Markdown、粘贴图片与实时预览</span></div>';
+    return;
+  }
   if (state.scope === 'inbox') {
     elements.readerKind.textContent = 'IN';
     elements.readerTitle.textContent = '收件箱暂存区';
@@ -1015,7 +1095,7 @@ async function renderViewer() {
       <div class="inbox-viewer-empty">
         <div class="inbox-viewer-glyph">⇩</div>
         <p>${state.inboxAvailable === false ? '需要更新后台' : state.inboxFiles.length ? `${state.inboxFiles.length} 个文件等待处理` : '收件箱为空'}</p>
-        <span>${state.inboxAvailable === false ? '关闭现有工作台窗口，再重新双击启动程序' : '把 PDF、图片或网址文件拖到左侧上传区'}</span>
+        <span>${state.inboxAvailable === false ? '关闭现有工作台窗口，再重新双击启动程序' : '把文档、图片、音频、压缩包或网址文件拖到左侧上传区'}</span>
         ${state.inboxAvailable === false ? '' : `<button type="button" data-inbox-choose>${state.inboxFiles.length ? '继续添加文件' : '选择文件'}</button>`}
       </div>`;
     return;
@@ -1023,7 +1103,7 @@ async function renderViewer() {
   if (!item) {
     elements.readerKind.textContent = '—';
     elements.readerTitle.textContent = '选择一项资料开始阅读';
-    elements.readerSubtitle.textContent = 'PDF、Markdown、图片和视频链接都可以在这里查看';
+    elements.readerSubtitle.textContent = '文档、图片、音频、压缩包和视频链接都可以在这里查看';
     elements.openOriginal.classList.add('is-disabled');
     elements.openOriginal.removeAttribute('href');
     elements.viewer.innerHTML = '<div class="viewer-empty"><div class="empty-glyph">文</div><p>从上方资料列表中选择一项</p><span>原件和知识笔记会显示在这里</span></div>';
@@ -1047,7 +1127,9 @@ async function renderViewer() {
     elements.viewer.innerHTML = embed
       ? `<iframe title="${escapeHtml(item.title)}" src="${escapeHtml(embed)}" allow="accelerometer; autoplay; encrypted-media; picture-in-picture" allowfullscreen referrerpolicy="strict-origin-when-cross-origin"></iframe>`
       : `<div class="video-card"><div class="video-info"><div class="video-play">▶</div><h3>${escapeHtml(item.title)}</h3><p>视频摘要来自标题和简介。当前来源需要在原网站观看。</p><a class="source-button" href="${escapeHtml(item.source_url || '#')}" target="_blank" rel="noreferrer">前往视频来源 ↗</a></div></div>`;
-  } else if (item.kind === 'article') {
+  } else if (item.kind === 'audio') {
+    elements.viewer.innerHTML = `<div class="video-card"><div class="video-info"><div class="video-play">♪</div><h3>${escapeHtml(item.title)}</h3><p>音频不会自动转写。播放原件后，可在右侧填写内容校正并重新分析。</p><audio controls preload="metadata" src="/api/items/${item.id}/asset"></audio></div></div>`;
+  } else if (['article', 'markdown', 'text', 'code', 'document', 'presentation', 'spreadsheet', 'ebook', 'archive'].includes(item.kind)) {
     await textPreview(item, 'text', token);
   } else {
     elements.viewer.innerHTML = `<div class="error-state"><p>此类型暂不支持直接预览</p><span>可以使用右上角按钮打开原始文件</span></div>`;
@@ -1210,14 +1292,14 @@ function renderInspector() {
   const reviewWorkflow = item.status === 'review' ? `
     <section class="inspector-section review-workflow">
       <p class="inspector-label">人工复查</p>
-      <label class="edit-label" for="correctedText">正文或手写内容校正</label>
+      <label class="edit-label" for="correctedText">正文或内容校正</label>
       <textarea class="edit-textarea correction-textarea" id="correctedText" data-corrected-text placeholder="输入校正后的完整正文；重新分析会以这里的内容为依据。">${escapeHtml(item.corrected_text || '')}</textarea>
       <div class="review-actions">
         <button class="secondary-action" type="button" data-save-correction ${state.busyAction || state.backendCompatible === false ? 'disabled' : ''}>保存校正</button>
         <button class="primary-action" type="button" data-reanalyze ${state.busyAction || state.backendCompatible === false ? 'disabled' : ''}>重新分析</button>
       </div>
       <button class="approve-button" type="button" data-approve ${state.busyAction || state.backendCompatible === false || !item.summary?.trim() ? 'disabled' : ''}>批准并存入知识库</button>
-      <p class="workflow-hint">重新分析适用于手写或正文识别有误；已有可靠摘要时可直接批准。</p>
+      <p class="workflow-hint">音频、内容不足或提取有误时，可填写完整说明后重新分析；已有可靠摘要时可直接批准。</p>
     </section>` : '';
   const body = editing ? `
     <section class="inspector-section edit-panel">
@@ -1237,7 +1319,7 @@ function renderInspector() {
         <button class="primary-action" type="button" data-save-edit ${state.busyAction || state.backendCompatible === false ? 'disabled' : ''}>保存修改</button>
       </div>
       <div class="delete-item-zone">
-        <div><strong>删除资料</strong><span>同时删除原件、摘要、便签和元数据</span></div>
+        <div><strong>删除资料</strong><span>删除原件与阅读记录；绑定笔记会解除绑定并送入收件箱</span></div>
         <button class="delete-item-button" type="button" data-delete-item ${state.busyAction || state.backendCompatible === false ? 'disabled' : ''}>删除</button>
       </div>
     </section>` : `
@@ -1305,7 +1387,7 @@ function updateNoteLines() {
   }
   const viewerRect = elements.viewer.getBoundingClientRect();
   const lines = [];
-  for (const note of state.notes) {
+  for (const note of [...state.notes, ...state.boundNotebookNotes.filter(value => value.anchor)]) {
     const position = noteAnchorPosition(note);
     const card = elements.notesTrack.querySelector(`[data-note-id="${note.id}"]`);
     const marker = elements.anchorMarkers.querySelector(`[data-marker-id="${note.id}"]`);
@@ -1326,7 +1408,7 @@ function layoutNotes() {
   if (!state.readingMode || !selectedItem()) return updateNoteLines();
   const trackHeight = Math.max(elements.viewer.scrollHeight + 80, elements.notesScroll.clientHeight);
   elements.notesTrack.style.height = `${trackHeight}px`;
-  const placements = state.notes.map(note => ({ note, position: noteAnchorPosition(note) })).filter(value => value.position).sort((a, b) => a.position.contentY - b.position.contentY);
+  const placements = [...state.notes, ...state.boundNotebookNotes.filter(value => value.anchor)].map(note => ({ note, position: noteAnchorPosition(note) })).filter(value => value.position).sort((a, b) => a.position.contentY - b.position.contentY);
   let nextTop = 14;
   for (const { note, position } of placements) {
     const card = elements.notesTrack.querySelector(`[data-note-id="${note.id}"]`);
@@ -1342,21 +1424,130 @@ function layoutNotes() {
 
 function renderNotes() {
   const item = selectedItem();
-  elements.anchorMarkers.innerHTML = state.notes.map(note => `<span class="anchor-dot" data-marker-id="${note.id}" hidden></span>`).join('');
+  state.boundNotebookNotes = item ? state.items.filter(value => value.kind === 'note' && value.bound_item_id === item.id) : [];
+  const anchoredCards = [...state.notes, ...state.boundNotebookNotes.filter(note => note.anchor)];
+  elements.anchorMarkers.innerHTML = anchoredCards.map(note => `<span class="anchor-dot" data-marker-id="${note.id}" hidden></span>`).join('');
   if (!item) {
     elements.notesTrack.innerHTML = '<div class="notes-empty">选择资料后即可建立阅读便签。</div>';
     return layoutNotes();
   }
-  elements.notesTrack.innerHTML = state.notes.length ? state.notes.map(note => `
+  const stickyHtml = state.notes.map(note => `
     <article class="note-card" data-note-id="${note.id}">
       <div class="note-card-head">
         <button class="note-anchor-link" data-note-jump="${note.id}">${note.anchor.type === 'pdf' ? `PDF · 第 ${note.anchor.page} 页` : '正文锚点'}</button>
-        <button class="note-delete" data-note-delete="${note.id}" aria-label="删除便签">×</button>
+        <span><button class="note-convert" data-note-convert="${note.id}">转为笔记</button><button class="note-delete" data-note-delete="${note.id}" aria-label="删除便签">×</button></span>
       </div>
       <textarea data-note-content="${note.id}" placeholder="在这里记下想法…">${escapeHtml(note.content)}</textarea>
       <span class="note-saving" data-note-status="${note.id}">${note.content ? '已保存' : '空白便签'}</span>
-    </article>`).join('') : '<div class="notes-empty">还没有便签。点击“新建便签”，再点击文章中的位置。</div>';
+    </article>`).join('');
+  const notebookHtml = state.boundNotebookNotes.filter(note => note.anchor).map(note => `
+    <article class="note-card notebook-note-card" data-note-id="${note.id}" data-open-notebook="${note.id}">
+      <div class="note-card-head"><button class="note-anchor-link" data-note-jump="${note.id}">${note.anchor.type === 'pdf' ? `PDF · 第 ${note.anchor.page} 页` : '正文锚点'}</button><span>笔记</span></div>
+      <h4>${escapeHtml(note.title)}</h4><p>${escapeHtml(note.summary || '点击打开笔记编辑')}</p>
+    </article>`).join('');
+  elements.notesTrack.innerHTML = stickyHtml || notebookHtml ? `${stickyHtml}${notebookHtml}` : '<div class="notes-empty">还没有笔记或便签。点击右上角按钮，再点击文章中的位置。</div>';
   requestAnimationFrame(layoutNotes);
+}
+
+function bookmarkLocation(bookmark) {
+  if (bookmark.anchor.type === 'pdf') return `PDF · 第 ${bookmark.anchor.page} 页`;
+  return `正文 · ${Math.round(bookmark.anchor.y * 100)}%`;
+}
+
+function renderBookmarks() {
+  elements.bookmarkCount.textContent = state.bookmarks.length;
+  elements.bookmarkButton.setAttribute('aria-expanded', String(state.bookmarksOpen));
+  elements.bookmarkPopover.hidden = !state.bookmarksOpen;
+  if (!state.bookmarksOpen) return;
+  elements.bookmarkPopover.innerHTML = `
+    <header class="bookmark-popover-head">
+      <div><span>阅读书签</span><small>${state.bookmarks.length} 个位置</small></div>
+      <button type="button" data-bookmark-add>＋ 当前位置</button>
+    </header>
+    ${state.bookmarkNaming ? `<form class="bookmark-form" data-bookmark-form>
+      <input name="name" maxlength="80" placeholder="为当前位置命名" autocomplete="off" required>
+      <button type="submit">保存</button>
+      <button type="button" data-bookmark-cancel>取消</button>
+    </form>` : ''}
+    <div class="bookmark-list">
+      ${state.bookmarks.length ? state.bookmarks.map(bookmark => `<div class="bookmark-row">
+        <button type="button" data-bookmark-jump="${bookmark.id}" title="跳转到 ${escapeHtml(bookmark.name)}"><span>${escapeHtml(bookmark.name)}</span><small>${bookmarkLocation(bookmark)}</small></button>
+        <button type="button" data-bookmark-delete="${bookmark.id}" aria-label="删除书签 ${escapeHtml(bookmark.name)}">×</button>
+      </div>`).join('') : '<div class="bookmark-empty">还没有书签。滚动到目标位置后添加。</div>'}
+    </div>`;
+}
+
+function currentReadingAnchor() {
+  const viewerRect = elements.viewer.getBoundingClientRect();
+  const sheets = [...elements.viewer.querySelectorAll('.pdf-sheet')];
+  if (sheets.length) {
+    const focusY = viewerRect.top + Math.min(elements.viewer.clientHeight * .28, 180);
+    const sheet = sheets.find(value => {
+      const rect = value.getBoundingClientRect();
+      return rect.top <= focusY && rect.bottom >= focusY;
+    }) || sheets.reduce((closest, value) => {
+      const distance = Math.abs(value.getBoundingClientRect().top - focusY);
+      return distance < closest.distance ? { value, distance } : closest;
+    }, { value: sheets[0], distance: Infinity }).value;
+    const rect = sheet.getBoundingClientRect();
+    return { type: 'pdf', page: Number(sheet.dataset.page), x: .5, y: Math.max(0, Math.min(1, (focusY - rect.top) / rect.height)), view: state.tab };
+  }
+  const scrollHeight = Math.max(1, elements.viewer.scrollHeight);
+  return { type: 'document', x: .5, y: Math.max(0, Math.min(1, (elements.viewer.scrollTop + elements.viewer.clientHeight * .28) / scrollHeight)), view: state.tab };
+}
+
+async function saveReadingPosition({ immediate = false } = {}) {
+  const item = selectedItem();
+  if (!item || item.kind === 'note' || state.restoringReadingPosition) return;
+  const position = currentReadingAnchor();
+  const pdfPages = elements.viewer.querySelectorAll('.pdf-sheet').length;
+  const progress = position.type === 'pdf' && pdfPages ? Math.max(0, Math.min(1, (position.page - 1 + position.y) / pdfPages)) : position.y;
+  const persist = async () => {
+    const current = state.items.find(value => value.id === item.id);
+    if (!current) return;
+    current.reading_position = position;
+    current.reading_progress = progress;
+    await api(`/api/items/${item.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ reading_position: position, reading_progress: progress }) });
+  };
+  clearTimeout(state.readingPositionTimer);
+  if (immediate) return persist();
+  state.readingPositionTimer = setTimeout(() => persist().catch(error => showToast(error.message)), 650);
+}
+
+async function restoreReadingPosition(item, token = state.renderToken) {
+  const anchor = item?.reading_position;
+  if (!anchor || anchor.view && anchor.view !== state.tab || token !== state.renderToken) return;
+  await new Promise(resolve => requestAnimationFrame(resolve));
+  if (token !== state.renderToken) return;
+  state.restoringReadingPosition = true;
+  if (anchor.type === 'pdf') {
+    const sheet = elements.viewer.querySelector(`.pdf-sheet[data-page="${anchor.page}"]`);
+    if (sheet) {
+      const viewerRect = elements.viewer.getBoundingClientRect();
+      const sheetRect = sheet.getBoundingClientRect();
+      elements.viewer.scrollTop = Math.max(0, elements.viewer.scrollTop + sheetRect.top - viewerRect.top + anchor.y * sheetRect.height - elements.viewer.clientHeight * .28);
+    }
+  } else {
+    elements.viewer.scrollTop = Math.max(0, anchor.y * elements.viewer.scrollHeight - elements.viewer.clientHeight * .28);
+  }
+  requestAnimationFrame(() => { state.restoringReadingPosition = false; state.updatePdfPage?.(); layoutNotes(); });
+}
+
+async function jumpToAnchor(anchor, { smooth = true } = {}) {
+  if (anchor.view && anchor.view !== state.tab) {
+    state.tab = anchor.view;
+    await renderViewer();
+  }
+  if (anchor.type === 'pdf') {
+    const sheet = elements.viewer.querySelector(`.pdf-sheet[data-page="${anchor.page}"]`);
+    if (!sheet) return showToast('当前视图中找不到书签页');
+    const viewerRect = elements.viewer.getBoundingClientRect();
+    const sheetRect = sheet.getBoundingClientRect();
+    const target = elements.viewer.scrollTop + sheetRect.top - viewerRect.top + anchor.y * sheetRect.height - elements.viewer.clientHeight * .28;
+    elements.viewer.scrollTo({ top: Math.max(0, target), behavior: smooth ? 'smooth' : 'auto' });
+    return;
+  }
+  elements.viewer.scrollTo({ top: Math.max(0, anchor.y * elements.viewer.scrollHeight - elements.viewer.clientHeight * .28), behavior: smooth ? 'smooth' : 'auto' });
 }
 
 async function loadNotes() {
@@ -1364,14 +1555,25 @@ async function loadNotes() {
   if (!item) {
     state.notes = [];
     state.notesItemId = null;
+    state.bookmarks = [];
+    renderBookmarks();
     return renderNotes();
   }
   const itemId = item.id;
+  if (state.notesItemId !== itemId) {
+    state.notes = [];
+    state.bookmarks = [];
+    state.bookmarkNaming = false;
+    state.pendingBookmarkAnchor = null;
+    renderBookmarks();
+  }
   state.notesItemId = itemId;
   try {
-    const notes = await api(`/api/items/${itemId}/notes`);
+    const [notes, bookmarks] = await Promise.all([api(`/api/items/${itemId}/notes`), api(`/api/items/${itemId}/bookmarks`)]);
     if (state.notesItemId !== itemId || selectedItem()?.id !== itemId) return;
     state.notes = notes;
+    state.bookmarks = bookmarks;
+    renderBookmarks();
     renderNotes();
   } catch (error) {
     showToast(error.message);
@@ -1379,6 +1581,7 @@ async function loadNotes() {
 }
 
 function setPinning(value) {
+  if (value) setNotebookPinning(false);
   state.pinning = Boolean(value && state.readingMode && selectedItem());
   elements.workspace.classList.toggle('is-pinning', state.pinning);
   elements.newNoteButton.classList.toggle('is-pinning', state.pinning);
@@ -1387,11 +1590,19 @@ function setPinning(value) {
 }
 
 function setReadingMode(value) {
+  if (state.readingMode && !value) saveReadingPosition({ immediate: true }).catch(() => {});
   state.readingMode = Boolean(value && selectedItem());
   elements.workspace.classList.toggle('is-reading', state.readingMode);
   elements.readingToggle.setAttribute('aria-pressed', String(state.readingMode));
   elements.readingToggle.innerHTML = state.readingMode ? '<span>□</span> 退出阅读' : '<span>▣</span> 阅读模式';
   setPinning(false);
+  setNotebookPinning(false);
+  if (!state.readingMode) {
+    state.bookmarksOpen = false;
+    state.bookmarkNaming = false;
+    state.pendingBookmarkAnchor = null;
+    renderBookmarks();
+  }
   renderInspector();
   if (state.readingMode) loadNotes();
   else updateNoteLines();
@@ -1399,11 +1610,15 @@ function setReadingMode(value) {
 }
 
 function jumpToNote(note) {
-  if (note.anchor.type === 'pdf') {
-    elements.viewer.querySelector(`.pdf-sheet[data-page="${note.anchor.page}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    return;
-  }
-  elements.viewer.scrollTo({ top: Math.max(0, note.anchor.y * elements.viewer.scrollHeight - elements.viewer.clientHeight * .35), behavior: 'smooth' });
+  jumpToAnchor(note.anchor);
+}
+
+async function deleteBookmark(bookmarkId) {
+  const item = selectedItem();
+  if (!item || !window.confirm('删除这个书签？')) return;
+  await api(`/api/items/${item.id}/bookmarks/${bookmarkId}`, { method: 'DELETE' });
+  state.bookmarks = state.bookmarks.filter(bookmark => bookmark.id !== bookmarkId);
+  renderBookmarks();
 }
 
 async function deleteNote(noteId) {
@@ -1434,6 +1649,217 @@ function saveNote(noteId, content) {
       showToast(error.message);
     }
   }, 500));
+}
+
+function showNoteNameDialog(options) {
+  state.pendingNoteCreate = options;
+  elements.noteNameInput.value = '';
+  elements.noteNameHelp.textContent = options.type === 'anchored' ? '笔记将绑定当前资料，并固定在刚才选择的位置。' : options.type === 'folder' ? `笔记将直接保存在 Library / ${options.category}。` : '笔记将先保存在临时笔记区，由你决定何时送入收件箱。';
+  elements.noteNameDialog.hidden = false;
+  requestAnimationFrame(() => elements.noteNameInput.focus());
+}
+
+function closeNoteNameDialog() {
+  elements.noteNameDialog.hidden = true;
+  state.pendingNoteCreate = null;
+  state.pendingNotebookAnchor = null;
+}
+
+async function createNamedNote(title) {
+  const options = state.pendingNoteCreate;
+  if (!options) return;
+  const endpoint = options.type === 'temporary' ? '/api/notebook/temporary' : '/api/notebook/notes';
+  const payload = options.type === 'temporary' ? { title } : { title, category: options.category, bound_item_id: options.boundItemId, anchor: options.anchor };
+  const note = await api(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
+  closeNoteNameDialog();
+  setNotebookPinning(false);
+  if (options.type === 'temporary') state.temporaryNotes.unshift(note);
+  else state.items.unshift(note);
+  renderNavigation();
+  renderList();
+  if (state.readingMode) renderNotes();
+  await openNotebook(note.id);
+}
+
+function setNotebookPinning(value) {
+  state.notebookPinning = Boolean(value && state.readingMode && selectedItem());
+  elements.workspace.classList.toggle('is-pinning', state.notebookPinning || state.pinning);
+  elements.newNotebookButton.classList.toggle('is-pinning', state.notebookPinning);
+  elements.newNotebookButton.textContent = state.notebookPinning ? '取消锚定' : '＋ 笔记';
+  elements.pinHint.hidden = !(state.notebookPinning || state.pinning);
+  if (state.notebookPinning) elements.pinHint.textContent = '点击正文中想要锚定笔记的位置';
+  else if (state.pinning) elements.pinHint.textContent = '点击正文中想要锚定便签的位置';
+}
+
+function notebookEditorHtml(note, content, { close = true } = {}) {
+  const temporary = note.state === 'temporary';
+  return `<header class="notebook-pane-head"><div><strong>${temporary ? '临时笔记' : note.bound_item_id ? '绑定笔记' : '知识笔记'}</strong><small>${temporary ? '自动保存于本地草稿区' : escapeHtml(note.category || '')}</small></div><div class="notebook-head-actions">
+    ${temporary ? '<button type="button" data-notebook-submit>送入收件箱</button>' : `<a href="/api/notebook/notes/${note.id}/export/markdown">导出 MD 包</a><a href="/api/notebook/notes/${note.id}/export/pdf" target="_blank">导出 PDF</a>`}
+    ${close ? '<button type="button" data-notebook-close>关闭</button>' : ''}
+  </div></header><div class="notebook-editor-wrap"><input class="notebook-title-input" data-notebook-title maxlength="80" value="${escapeHtml(note.title)}" aria-label="笔记标题"><textarea class="notebook-editor" data-notebook-content spellcheck="true" placeholder="使用 Markdown 写下内容，可直接粘贴图片…">${escapeHtml(content)}</textarea><span class="notebook-save-status" data-notebook-save-status>已保存 · 可粘贴图片</span></div>`;
+}
+
+function notebookPreviewHtml(note, content, { close = false } = {}) {
+  return `<header class="notebook-pane-head"><div><strong>Markdown 预览</strong><small>图片随笔记保存在本地</small></div><div class="notebook-head-actions">${close ? '<button type="button" data-notebook-close>关闭</button>' : ''}</div></header><div class="notebook-preview"><article>${renderMarkdownHtml(content, { assetUrl: name => `/api/notebook/notes/${note.id}/assets/${encodeURIComponent(name)}` }) || '<p>开始书写后，这里会实时显示排版结果。</p>'}</article></div>`;
+}
+
+async function renderNotebookWorkspace() {
+  const active = state.activeNotebook;
+  if (!active) { elements.notebookWorkspace.hidden = true; return; }
+  elements.notebookWorkspace.hidden = false;
+  if (active.bound_item_id) {
+    const source = state.items.find(item => item.id === active.bound_item_id);
+    elements.notebookLeft.innerHTML = `<header class="notebook-pane-head"><div><strong>${escapeHtml(source?.title || '原资料')}</strong><small>${active.anchor?.type === 'pdf' ? `笔记锚点 · 第 ${active.anchor.page} 页` : '保留当前阅读位置'}</small></div><div class="notebook-head-actions"><button type="button" data-notebook-toggle-preview>预览笔记</button><button type="button" data-notebook-close>关闭</button></div></header><div class="notebook-source-host"></div><div class="notebook-preview notebook-source-preview" hidden><article>${renderMarkdownHtml(state.notebookContent, { assetUrl: name => `/api/notebook/notes/${active.id}/assets/${encodeURIComponent(name)}` }) || '<p>开始书写后，这里会显示排版结果。</p>'}</article></div>`;
+    if (!state.notebookReaderPlaceholder) {
+      state.notebookReaderPlaceholder = document.createComment('infobox-reader-position');
+      elements.reader.before(state.notebookReaderPlaceholder);
+    }
+    elements.notebookLeft.querySelector('.notebook-source-host').append(elements.reader);
+    elements.reader.classList.add('notebook-embedded-reader');
+    elements.notebookRight.innerHTML = notebookEditorHtml(active, state.notebookContent, { close: false });
+    await restoreReadingPosition(source);
+  } else {
+    elements.notebookLeft.innerHTML = notebookEditorHtml(active, state.notebookContent);
+    elements.notebookRight.innerHTML = notebookPreviewHtml(active, state.notebookContent);
+  }
+}
+
+async function toggleNotebookSourcePreview() {
+  if (!state.activeNotebook?.bound_item_id) return;
+  if (!state.notebookPreview) await saveReadingPosition({ immediate: true });
+  state.notebookPreview = !state.notebookPreview;
+  const source = elements.notebookLeft.querySelector('.notebook-source-host');
+  const preview = elements.notebookLeft.querySelector('.notebook-source-preview');
+  const button = elements.notebookLeft.querySelector('[data-notebook-toggle-preview]');
+  if (source) source.hidden = state.notebookPreview;
+  if (preview) {
+    preview.hidden = !state.notebookPreview;
+    preview.querySelector('article').innerHTML = renderMarkdownHtml(state.notebookContent, { assetUrl: name => `/api/notebook/notes/${state.activeNotebook.id}/assets/${encodeURIComponent(name)}` }) || '<p>开始书写后，这里会显示排版结果。</p>';
+  }
+  if (button) button.textContent = state.notebookPreview ? '返回原资料' : '预览笔记';
+  if (!state.notebookPreview) await restoreReadingPosition(selectedItem());
+}
+
+async function openNotebook(id) {
+  try {
+    const record = await api(`/api/notebook/notes/${id}`);
+    if (record.note.bound_item_id) {
+      const source = state.items.find(item => item.id === record.note.bound_item_id);
+      if (!source) throw new Error('绑定的原资料暂时不可用');
+      if (selectedItem()?.id === source.id) await saveReadingPosition({ immediate: true });
+      else {
+        state.selectedId = source.id;
+        state.tab = source.reading_position?.view || record.note.anchor?.view || 'asset';
+        state.graphMode = false;
+        setGraphMode(false);
+        renderList();
+        renderInspector();
+        await renderViewer();
+      }
+    }
+    state.activeNotebook = record.note;
+    state.notebookContent = record.content || '';
+    state.notebookPreview = false;
+    await renderNotebookWorkspace();
+    requestAnimationFrame(() => elements.notebookWorkspace.querySelector('[data-notebook-content]')?.focus());
+  } catch (error) { showToast(error.message); }
+}
+
+async function closeNotebook() {
+  clearTimeout(state.notebookSaveTimer);
+  if (state.activeNotebook) await persistActiveNotebook().catch(error => showToast(error.message));
+  if (state.activeNotebook?.bound_item_id) await saveReadingPosition({ immediate: true }).catch(error => showToast(error.message));
+  if (state.notebookReaderPlaceholder?.isConnected) state.notebookReaderPlaceholder.replaceWith(elements.reader);
+  elements.reader.classList.remove('notebook-embedded-reader');
+  await restoreReadingPosition(selectedItem());
+  state.notebookReaderPlaceholder = null;
+  state.activeNotebook = null;
+  state.notebookContent = '';
+  state.notebookPreview = false;
+  elements.notebookWorkspace.hidden = true;
+  renderNavigation();
+  renderList();
+  renderInspector();
+  if (state.readingMode) renderNotes();
+  if (state.graphMode) renderGraph();
+}
+
+async function persistActiveNotebook() {
+  if (!state.activeNotebook) return;
+  const status = elements.notebookWorkspace.querySelector('[data-notebook-save-status]');
+  if (status) status.textContent = '保存中…';
+  const title = elements.notebookWorkspace.querySelector('[data-notebook-title]')?.value.trim() || '未命名笔记';
+  const content = elements.notebookWorkspace.querySelector('[data-notebook-content]')?.value ?? state.notebookContent;
+  const saved = await api(`/api/notebook/notes/${state.activeNotebook.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title, content }) });
+  state.activeNotebook = { ...state.activeNotebook, ...saved, title };
+  state.notebookContent = content;
+  const item = state.items.find(value => value.id === state.activeNotebook.id);
+  if (item) Object.assign(item, state.activeNotebook);
+  const temporary = state.temporaryNotes.find(value => value.id === state.activeNotebook.id);
+  if (temporary) Object.assign(temporary, state.activeNotebook);
+  const currentStatus = elements.notebookWorkspace.querySelector('[data-notebook-save-status]');
+  if (currentStatus) currentStatus.textContent = '已保存 · 可粘贴图片';
+  const preview = elements.notebookWorkspace.querySelector('.notebook-preview article');
+  if (preview) preview.innerHTML = renderMarkdownHtml(content, { assetUrl: name => `/api/notebook/notes/${state.activeNotebook.id}/assets/${encodeURIComponent(name)}` }) || '<p>开始书写后，这里会实时显示排版结果。</p>';
+}
+
+function scheduleNotebookSave() {
+  clearTimeout(state.notebookSaveTimer);
+  const status = elements.notebookWorkspace.querySelector('[data-notebook-save-status]');
+  if (status) status.textContent = '保存中…';
+  state.notebookSaveTimer = setTimeout(() => persistActiveNotebook().catch(error => { if (status) status.textContent = '保存失败'; showToast(error.message); }), 450);
+}
+
+async function pasteNotebookImage(event) {
+  const file = [...(event.clipboardData?.items || [])].find(item => item.kind === 'file' && item.type.startsWith('image/'))?.getAsFile();
+  if (!file || !state.activeNotebook) return;
+  event.preventDefault();
+  try {
+    const response = await fetch(`/api/notebook/notes/${state.activeNotebook.id}/assets?filename=${encodeURIComponent(file.name || `image-${Date.now()}.png`)}`, { method: 'POST', body: file });
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || '图片保存失败');
+    const asset = await response.json();
+    const textarea = event.target;
+    const start = textarea.selectionStart;
+    const insertion = `${start && textarea.value[start - 1] !== '\n' ? '\n' : ''}${asset.markdown}\n`;
+    textarea.setRangeText(insertion, start, textarea.selectionEnd, 'end');
+    state.notebookContent = textarea.value;
+    scheduleNotebookSave();
+    showToast('图片已保存到笔记资料包');
+  } catch (error) { showToast(error.message); }
+}
+
+async function submitActiveNotebook() {
+  if (!state.activeNotebook || state.activeNotebook.state !== 'temporary') return;
+  try {
+    clearTimeout(state.notebookSaveTimer);
+    await persistActiveNotebook();
+    await api(`/api/notebook/notes/${state.activeNotebook.id}/submit`, { method: 'POST' });
+    showToast('笔记已送入收件箱，等待手动分类');
+    await closeNotebook();
+    const [inboxFiles, temporaryNotes] = await Promise.all([
+      api('/api/inbox'),
+      api('/api/notebook/temporary')
+    ]);
+    state.inboxFiles = inboxFiles;
+    state.temporaryNotes = temporaryNotes;
+    state.scope = 'inbox';
+    render();
+  } catch (error) { showToast(error.message); }
+}
+
+async function convertSticky(noteId) {
+  const item = selectedItem();
+  const sticky = state.notes.find(note => note.id === noteId);
+  if (!item || !sticky) return;
+  const title = window.prompt('给这篇笔记命名：', sticky.content.trim().slice(0, 30) || '阅读笔记');
+  if (!title?.trim()) return;
+  try {
+    const note = await api(`/api/items/${item.id}/notes/${noteId}/convert`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title }) });
+    state.notes = state.notes.filter(value => value.id !== noteId);
+    state.items.unshift(note);
+    renderNotes();
+    await openNotebook(note.id);
+  } catch (error) { showToast(error.message); }
 }
 
 function render() {
@@ -1674,7 +2100,8 @@ async function importUrlsToInbox() {
 async function deleteLibraryItem() {
   const item = selectedItem();
   if (!item || state.busyAction) return;
-  if (!window.confirm(`确定永久删除“${item.title}”吗？原件、摘要、便签和元数据都会被删除。`)) return;
+  const message = item.kind === 'note' ? `确定永久删除笔记“${item.title}”吗？` : `确定永久删除“${item.title}”吗？原件和阅读记录会被删除，绑定笔记会解除绑定并送入收件箱。`;
+  if (!window.confirm(message)) return;
   state.busyAction = true;
   renderInspector();
   try {
@@ -1765,17 +2192,19 @@ async function processInbox() {
 
 async function load({ quiet = false } = {}) {
   try {
-    const [healthResult, itemsResult, treeResult, inboxResult, viewsResult, relationsResult, historyResult] = await Promise.allSettled([api('/health'), api('/api/items'), api('/api/library/tree'), api('/api/inbox'), api('/api/views'), api('/api/relations'), api('/api/restructure/history')]);
+    const [healthResult, itemsResult, treeResult, inboxResult, viewsResult, relationsResult, historyResult, temporaryNotesResult] = await Promise.allSettled([api('/health'), api('/api/items'), api('/api/library/tree'), api('/api/inbox'), api('/api/views'), api('/api/relations'), api('/api/restructure/history'), api('/api/notebook/temporary')]);
     if (itemsResult.status === 'rejected') throw itemsResult.reason;
     if (treeResult.status === 'rejected') throw treeResult.reason;
     state.items = itemsResult.value;
     state.tree = treeResult.value;
-    state.backendCompatible = healthResult.status === 'fulfilled' && Number(healthResult.value.api_version) >= 9;
+    initializeCollapsedFolders();
+    state.backendCompatible = healthResult.status === 'fulfilled' && Number(healthResult.value.api_version) >= 13;
     state.inboxAvailable = state.backendCompatible && inboxResult.status === 'fulfilled';
     state.inboxFiles = state.inboxAvailable ? inboxResult.value : [];
     state.savedViews = viewsResult.status === 'fulfilled' ? viewsResult.value : [];
     state.relations = relationsResult.status === 'fulfilled' ? relationsResult.value : [];
     state.restructureHistory = historyResult.status === 'fulfilled' ? historyResult.value : [];
+    state.temporaryNotes = temporaryNotesResult.status === 'fulfilled' ? temporaryNotesResult.value : [];
     elements.statusDot.className = 'status-dot is-online';
     elements.connectionStatus.textContent = state.inboxAvailable ? `${state.items.length} 项资料 · 本地连接正常` : `${state.items.length} 项资料 · 后台需要重启`;
     render();
@@ -1793,7 +2222,7 @@ async function load({ quiet = false } = {}) {
   }
 }
 
-document.addEventListener('click', event => {
+document.addEventListener('click', async event => {
   if (state.libraryCreateMenuOpen && !event.target.closest('[data-library-create-toggle], .library-create-menu')) {
     state.libraryCreateMenuOpen = false;
     elements.tree.querySelector('.library-create-menu')?.remove();
@@ -1821,6 +2250,13 @@ document.addEventListener('click', event => {
     state.collapsedFolders.delete(state.creatingFolderParent);
     renderNavigation();
     requestAnimationFrame(() => elements.tree.querySelector('[data-folder-name]')?.focus());
+    return;
+  }
+  const folderNote = event.target.closest('[data-new-note-category]');
+  if (folderNote) { event.stopPropagation(); showNoteNameDialog({ type: 'folder', category: folderNote.dataset.newNoteCategory }); return; }
+  if (event.target.closest('[data-new-temporary-note]')) {
+    state.libraryCreateMenuOpen = false;
+    showNoteNameDialog({ type: 'temporary' });
     return;
   }
   if (event.target.closest('[data-library-create-toggle]')) {
@@ -1998,18 +2434,19 @@ document.addEventListener('click', event => {
   }
   const nav = event.target.closest('[data-scope]');
   if (nav) {
+    if (state.readingMode) setReadingMode(false);
     state.scope = nav.dataset.scope;
     state.category = '';
     state.selectedId = null;
     state.editingItemId = null;
     setGraphMode(false);
-    if (state.scope === 'inbox') setReadingMode(false);
     render();
     pushNavigation();
     return;
   }
   const category = event.target.closest('[data-category]');
   if (category) {
+    if (state.readingMode) setReadingMode(false);
     state.scope = 'category';
     state.category = category.dataset.category;
     state.selectedId = null;
@@ -2021,8 +2458,11 @@ document.addEventListener('click', event => {
   }
   const row = event.target.closest('[data-id]');
   if (row) {
+    const chosen = state.items.find(item => item.id === row.dataset.id);
+    if (chosen?.kind === 'note') { openNotebook(chosen.id); return; }
+    await saveReadingPosition({ immediate: true }).catch(() => {});
     state.selectedId = row.dataset.id;
-    state.tab = 'asset';
+    state.tab = chosen?.reading_position?.view || 'asset';
     state.notes = [];
     state.notesItemId = null;
     state.editingItemId = null;
@@ -2037,6 +2477,7 @@ document.addEventListener('click', event => {
   }
   const tab = event.target.closest('[data-tab]');
   if (tab) {
+    await saveReadingPosition({ immediate: true }).catch(() => {});
     state.tab = tab.dataset.tab;
     renderViewer();
     pushNavigation();
@@ -2054,10 +2495,14 @@ document.addEventListener('click', event => {
   }
   const noteJump = event.target.closest('[data-note-jump]');
   if (noteJump) {
-    const note = state.notes.find(value => value.id === noteJump.dataset.noteJump);
+    const note = [...state.notes, ...state.boundNotebookNotes].find(value => value.id === noteJump.dataset.noteJump);
     if (note) jumpToNote(note);
     return;
   }
+  const notebookOpen = event.target.closest('[data-open-notebook]');
+  if (notebookOpen) { openNotebook(notebookOpen.dataset.openNotebook); return; }
+  const noteConvert = event.target.closest('[data-note-convert]');
+  if (noteConvert) { event.stopPropagation(); convertSticky(noteConvert.dataset.noteConvert); return; }
   const noteDelete = event.target.closest('[data-note-delete]');
   if (noteDelete) {
     deleteNote(noteDelete.dataset.noteDelete).catch(error => showToast(error.message));
@@ -2088,7 +2533,42 @@ elements.urlImportInput.addEventListener('input', () => {
 elements.urlImportInput.addEventListener('keydown', event => {
   if ((event.ctrlKey || event.metaKey) && event.key === 'Enter') importUrlsToInbox();
 });
-document.addEventListener('keydown', event => { if (event.key === 'Escape' && !elements.urlImportDialog.hidden) closeUrlImportDialog(); });
+elements.noteNameForm.addEventListener('submit', event => {
+  event.preventDefault();
+  const title = elements.noteNameInput.value.trim();
+  if (title) createNamedNote(title).catch(error => showToast(error.message));
+});
+elements.noteNameDialog.addEventListener('click', event => {
+  if (event.target === elements.noteNameDialog || event.target.closest('[data-note-name-cancel]')) { closeNoteNameDialog(); setNotebookPinning(false); }
+});
+elements.notebookWorkspace.addEventListener('input', event => {
+  if (event.target.matches('[data-notebook-title], [data-notebook-content]')) {
+    if (event.target.matches('[data-notebook-content]')) state.notebookContent = event.target.value;
+    scheduleNotebookSave();
+  }
+});
+elements.notebookWorkspace.addEventListener('paste', event => {
+  if (event.target.matches('[data-notebook-content]')) pasteNotebookImage(event);
+});
+elements.notebookWorkspace.addEventListener('click', async event => {
+  if (event.target.closest('[data-notebook-close]')) return closeNotebook();
+  if (event.target.closest('[data-notebook-submit]')) return submitActiveNotebook();
+  if (event.target.closest('[data-notebook-toggle-preview]')) {
+    toggleNotebookSourcePreview();
+    return;
+  }
+});
+document.addEventListener('keydown', event => {
+  if (event.key !== 'Escape') return;
+  if (!elements.urlImportDialog.hidden) closeUrlImportDialog();
+  if (!elements.noteNameDialog.hidden) { closeNoteNameDialog(); setNotebookPinning(false); }
+  if (state.bookmarksOpen) {
+    state.bookmarksOpen = false;
+    state.bookmarkNaming = false;
+    state.pendingBookmarkAnchor = null;
+    renderBookmarks();
+  }
+});
 for (const eventName of ['dragenter', 'dragover']) {
   elements.inboxDropzone.addEventListener(eventName, event => {
     event.preventDefault();
@@ -2105,9 +2585,78 @@ for (const eventName of ['dragleave', 'drop']) {
 
 elements.readingToggle.addEventListener('click', () => setReadingMode(!state.readingMode));
 elements.newNoteButton.addEventListener('click', () => setPinning(!state.pinning));
+elements.newNotebookButton.addEventListener('click', () => {
+  if (!state.notebookPinning) setPinning(false);
+  setNotebookPinning(!state.notebookPinning);
+});
+elements.bookmarkButton.addEventListener('click', event => {
+  event.stopPropagation();
+  state.bookmarksOpen = !state.bookmarksOpen;
+  if (!state.bookmarksOpen) {
+    state.bookmarkNaming = false;
+    state.pendingBookmarkAnchor = null;
+  }
+  renderBookmarks();
+});
+
+elements.bookmarkPopover.addEventListener('click', async event => {
+  event.stopPropagation();
+  if (event.target.closest('[data-bookmark-add]')) {
+    state.pendingBookmarkAnchor = currentReadingAnchor();
+    state.bookmarkNaming = true;
+    renderBookmarks();
+    requestAnimationFrame(() => elements.bookmarkPopover.querySelector('input[name="name"]')?.focus());
+    return;
+  }
+  if (event.target.closest('[data-bookmark-cancel]')) {
+    state.bookmarkNaming = false;
+    state.pendingBookmarkAnchor = null;
+    renderBookmarks();
+    return;
+  }
+  const jump = event.target.closest('[data-bookmark-jump]');
+  if (jump) {
+    const bookmark = state.bookmarks.find(value => value.id === jump.dataset.bookmarkJump);
+    if (bookmark) await jumpToAnchor(bookmark.anchor);
+    state.bookmarksOpen = false;
+    renderBookmarks();
+    return;
+  }
+  const remove = event.target.closest('[data-bookmark-delete]');
+  if (remove) deleteBookmark(remove.dataset.bookmarkDelete).catch(error => showToast(error.message));
+});
+
+elements.bookmarkPopover.addEventListener('submit', async event => {
+  if (!event.target.matches('[data-bookmark-form]')) return;
+  event.preventDefault();
+  const item = selectedItem();
+  const name = new FormData(event.target).get('name')?.toString().trim();
+  if (!item || !name || !state.pendingBookmarkAnchor) return;
+  try {
+    const bookmark = await api(`/api/items/${item.id}/bookmarks`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, anchor: state.pendingBookmarkAnchor }),
+    });
+    if (selectedItem()?.id !== item.id) return;
+    state.bookmarks.push(bookmark);
+    state.bookmarkNaming = false;
+    state.pendingBookmarkAnchor = null;
+    renderBookmarks();
+    showToast('书签已添加');
+  } catch (error) {
+    showToast(error.message);
+  }
+});
+
+document.addEventListener('click', event => {
+  if (!state.bookmarksOpen || event.target.closest('#bookmarkButton, #bookmarkPopover')) return;
+  state.bookmarksOpen = false;
+  state.bookmarkNaming = false;
+  state.pendingBookmarkAnchor = null;
+  renderBookmarks();
+});
 
 elements.viewer.addEventListener('click', async event => {
-  if (!state.pinning) return;
+  if (!state.pinning && !state.notebookPinning) return;
   const item = selectedItem();
   if (!item) return setPinning(false);
   const sheet = event.target.closest('.pdf-sheet');
@@ -2121,6 +2670,11 @@ elements.viewer.addEventListener('click', async event => {
     anchor = { type: 'document', x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)), y: Math.max(0, Math.min(1, (event.clientY - rect.top + elements.viewer.scrollTop) / elements.viewer.scrollHeight)) };
   }
   if (!anchor) return showToast('请点击 PDF 页面或文章正文');
+  if (state.notebookPinning) {
+    state.pendingNotebookAnchor = { ...anchor, view: state.tab };
+    showNoteNameDialog({ type: 'anchored', boundItemId: item.id, category: item.category, anchor: state.pendingNotebookAnchor });
+    return;
+  }
   try {
     const note = await api(`/api/items/${item.id}/notes`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ anchor }),
@@ -2146,6 +2700,7 @@ elements.viewer.addEventListener('scroll', () => {
   viewerScrollFrame = requestAnimationFrame(() => {
     state.updatePdfPage?.();
     if (state.readingMode) layoutNotes();
+    saveReadingPosition();
     viewerScrollFrame = null;
   });
 });
