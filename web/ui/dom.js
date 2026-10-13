@@ -1,0 +1,100 @@
+export const elements = {
+  workspace: document.querySelector('#workspace'),
+  sidebarToggle: document.querySelector('#sidebarToggle'),
+  inboxCount: document.querySelector('#inboxCount'),
+  temporaryNoteCount: document.querySelector('#temporaryNoteCount'),
+  inboxDropzone: document.querySelector('#inboxDropzone'),
+  inboxFileInput: document.querySelector('#inboxFileInput'),
+  inboxChooseButton: document.querySelector('#inboxChooseButton'),
+  processInboxButton: document.querySelector('#processInboxButton'),
+  processInboxLabel: document.querySelector('#processInboxLabel'),
+  inboxStatus: document.querySelector('#inboxStatus'),
+  allCount: document.querySelector('#allCount'),
+  recentCount: document.querySelector('#recentCount'),
+  reviewCount: document.querySelector('#reviewCount'),
+  favoriteCount: document.querySelector('#favoriteCount'),
+  unreadCount: document.querySelector('#unreadCount'),
+  savedViewCount: document.querySelector('#savedViewCount'),
+  savedViewList: document.querySelector('#savedViewList'),
+  libraryCount: document.querySelector('#libraryCount'),
+  structureButton: document.querySelector('#structureButton'),
+  structureCancelButton: document.querySelector('#structureCancelButton'),
+  rollbackButton: document.querySelector('#rollbackButton'),
+  rollbackPanel: document.querySelector('#rollbackPanel'),
+  tree: document.querySelector('#libraryTree'),
+  collectionPath: document.querySelector('#collectionPath'),
+  collectionTitle: document.querySelector('#collectionTitle'),
+  search: document.querySelector('#searchInput'),
+  contentColumn: document.querySelector('.content-column'),
+  reader: document.querySelector('.reader'),
+  backButton: document.querySelector('#backButton'),
+  forwardButton: document.querySelector('#forwardButton'),
+  filterButton: document.querySelector('#filterButton'),
+  filterCount: document.querySelector('#filterCount'),
+  filterPanel: document.querySelector('#filterPanel'),
+  folderFilter: document.querySelector('#folderFilter'),
+  folderFilterButton: document.querySelector('#folderFilterButton'),
+  folderFilterSelection: document.querySelector('#folderFilterSelection'),
+  folderFilterPopover: document.querySelector('#folderFilterPopover'),
+  urlImportDialog: document.querySelector('#urlImportDialog'),
+  urlImportInput: document.querySelector('#urlImportInput'),
+  urlImportFeedback: document.querySelector('#urlImportFeedback'),
+  urlImportSubmit: document.querySelector('#urlImportSubmit'),
+  structureHistory: document.querySelector('#structureHistory'),
+  movePopover: document.querySelector('#movePopover'),
+  graphButton: document.querySelector('#graphButton'),
+  graphPanel: document.querySelector('#graphPanel'),
+  graphCanvas: document.querySelector('#graphCanvas'),
+  graphZoom: document.querySelector('#graphZoom'),
+  resultCount: document.querySelector('#resultCount'),
+  list: document.querySelector('#itemList'),
+  readerKind: document.querySelector('#readerKind'),
+  readerTitle: document.querySelector('#readerTitle'),
+  readerSubtitle: document.querySelector('#readerSubtitle'),
+  viewer: document.querySelector('#viewer'),
+  openOriginal: document.querySelector('#openOriginal'),
+  readingToggle: document.querySelector('#readingToggle'),
+  inspectorEmpty: document.querySelector('#inspectorEmpty'),
+  inspector: document.querySelector('#inspectorContent'),
+  notesPanel: document.querySelector('#notesPanel'),
+  newNoteButton: document.querySelector('#newNoteButton'),
+  newNotebookButton: document.querySelector('#newNotebookButton'),
+  bookmarkButton: document.querySelector('#bookmarkButton'),
+  bookmarkCount: document.querySelector('#bookmarkCount'),
+  bookmarkPopover: document.querySelector('#bookmarkPopover'),
+  pinHint: document.querySelector('#pinHint'),
+  notesScroll: document.querySelector('#notesScroll'),
+  notesTrack: document.querySelector('#notesTrack'),
+  noteLines: document.querySelector('#noteLines'),
+  anchorMarkers: document.querySelector('#anchorMarkers'),
+  notebookWorkspace: document.querySelector('#notebookWorkspace'),
+  notebookLeft: document.querySelector('#notebookLeft'),
+  notebookRight: document.querySelector('#notebookRight'),
+  noteNameDialog: document.querySelector('#noteNameDialog'),
+  noteNameForm: document.querySelector('#noteNameForm'),
+  noteNameInput: document.querySelector('#noteNameInput'),
+  noteNameHelp: document.querySelector('#noteNameHelp'),
+  statusDot: document.querySelector('#statusDot'),
+  connectionStatus: document.querySelector('#connectionStatus'),
+  toast: document.querySelector('#toast'),
+};
+
+export function escapeHtml(value = '') {
+  return String(value).replace(/[&<>'"]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character]);
+}
+
+export function formatBytes(bytes) {
+  if (!Number.isFinite(bytes) || bytes < 1) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  const value = bytes / 1024 ** index;
+  return `${value >= 10 || index === 0 ? Math.round(value) : value.toFixed(1)} ${units[index]}`;
+}
+
+export function inboxType(file) {
+  return String(file.extension || '').replace('.', '').toUpperCase() || 'FILE';
+}
+
+export function typeClass(item) {
+  return ['pdf', 'video', 'image'].includes(item.kind) ? item.kind : '';
+}

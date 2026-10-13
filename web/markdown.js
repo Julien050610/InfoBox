@@ -2,8 +2,9 @@ const escapeHtml = value => String(value ?? '').replace(/[&<>"']/g, character =>
 
 function inline(value, assetUrl = name => name) {
   let source = escapeHtml(value);
-  source = source.replace(/!\[([^\]]*)\]\((assets\/[^)\s]+)\)/g, (_, alt, path) => {
-    const name = path.slice('assets/'.length).split('/').map(part => { try { return decodeURIComponent(part); } catch { return part; } }).join('-');
+  source = source.replace(/!\[([^\]]*)\]\(((?:assets\/|\.\.\/attachments\/[^/]+\/)[^)\s]+)\)/g, (_, alt, path) => {
+    const relative = path.startsWith('assets/') ? path.slice('assets/'.length) : path.split('/').at(-1);
+    const name = relative.split('/').map(part => { try { return decodeURIComponent(part); } catch { return part; } }).join('-');
     return `<img src="${escapeHtml(assetUrl(name))}" alt="${alt}" loading="lazy">`;
   });
   source = source.replace(/\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');

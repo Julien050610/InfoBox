@@ -1,14 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, stat, writeFile, mkdir } from 'node:fs/promises';
+import { mkdtemp, readFile, rename, rm, stat, writeFile, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ZipFile } from 'yazl';
-import { extractFile, extractHtml, extractPdf } from '../src/extract.js';
+import { createPinnedLookup, extractFile, extractHtml, extractPdf, fetchPage, resolveRemoteUrl } from '../src/extract.js';
 import { analyzeContent, decideWithJev } from '../src/models.js';
 import { Library } from '../src/library.js';
 import { createApi } from '../src/server.js';
 import { processInbox } from '../src/run-once.js';
+import { readJsonArray, readJsonFile, recoverPendingWrites, updateJsonArray, writeJsonFile } from '../src/storage/local-json-store.js';
 
 function samplePdf() {
   const objects = [
@@ -75,6 +76,35 @@ test('extracts article text, video metadata, and PDF text', async () => {
   assert.equal(structuredVideo.publishedAt, '2026-09-01');
   const pdf = await extractPdf(samplePdf());
   assert.match(pdf.text, /Agent Harness Design/);
+});
+
+test('pins validated public DNS addresses and revalidates redirects', async () => {
+  const lookups = [];
+  const lookup = async hostname => {
+    lookups.push(hostname);
+    if (hostname === 'example.org') return [{ address: '93.184.216.34', family: 4 }];
+    if (hostname === 'cdn.example.org') return [{ address: '2606:4700::6810:1', family: 6 }];
+    return [{ address: '127.0.0.1', family: 4 }];
+  };
+  let request = 0;
+  const fetched = await fetchPage('https://example.org/start', async (_url, options) => {
+    assert.ok(options.dispatcher);
+    request += 1;
+    return request === 1
+      ? new Response(null, { status: 302, headers: { location: 'https://cdn.example.org/page' } })
+      : new Response('<article><p>safe response</p></article>', { status: 200, headers: { 'content-type': 'text/html' } });
+  }, lookup);
+  assert.deepEqual(lookups, ['example.org', 'cdn.example.org']);
+  assert.equal(fetched.url, 'https://cdn.example.org/page');
+
+  await assert.rejects(resolveRemoteUrl('http://private.example/', async () => [{ address: '192.168.1.1', family: 4 }]), /Private or local/);
+  const pinned = createPinnedLookup([{ address: '93.184.216.34', family: 4 }]);
+  await new Promise((resolve, reject) => pinned('example.org', { family: 4 }, (error, address, family) => {
+    if (error) return reject(error);
+    assert.equal(address, '93.184.216.34');
+    assert.equal(family, 4);
+    resolve();
+  }));
 });
 
 test('extracts text from office, ebook, HTML, code, and archive files', async () => {
@@ -217,7 +247,7 @@ test('uploads, files, deduplicates, and updates manual quality score', async () 
     assert.equal((await waitForJob(base, first.id)).status, 'ready');
     const items = await (await fetch(`${base}/api/items`)).json();
     assert.equal(items.length, 1);
-    assert.match(items[0].asset_path, /library[\\/]AI[\\/]Agent[\\/]2026-09-Agent-Harness-Design\.png$/);
+    assert.match(items[0].asset_path, new RegExp(`library[\\\\/]AI[\\\\/]Agent[\\\\/]${items[0].received_at.slice(0, 7)}-Agent-Harness-Design\\.png$`));
     await stat(items[0].asset_path);
     const tree = await (await fetch(`${base}/api/library/tree`)).json();
     assert.equal(tree.count, 1);
@@ -250,7 +280,7 @@ test('uploads, files, deduplicates, and updates manual quality score', async () 
     const workbench = await fetch(base);
     assert.match(await workbench.text(), /InfoBox/);
     const health = await (await fetch(`${base}/health`)).json();
-  assert.equal(health.api_version, 13);
+    assert.equal(health.api_version, 15);
     const pdfRuntime = await fetch(`${base}/vendor/pdf.mjs`);
     assert.equal(pdfRuntime.status, 200);
     assert.match(await pdfRuntime.text(), /getDocument/);
@@ -266,7 +296,7 @@ test('uploads, files, deduplicates, and updates manual quality score', async () 
     assert.equal(edited.title, 'Agent-Harness-Updated');
     assert.deepEqual(edited.tags, ['agent', 'edited']);
     const refreshed = (await library.items()).find(item => item.id === items[0].id);
-    assert.match(refreshed.asset_path, /2026-09-Agent-Harness-Updated\.png$/);
+    assert.match(refreshed.asset_path, new RegExp(`${refreshed.received_at.slice(0, 7)}-Agent-Harness-Updated\\.png$`));
     assert.equal(await stat(previousAssetPath).then(() => true, () => false), false);
     assert.match(await readFile(refreshed.metadata_path.slice(0, -5) + '.summary.md', 'utf8'), /更新后的摘要/);
     const second = await upload();
@@ -359,6 +389,34 @@ test('imports multiple URLs into the inbox without starting classification', asy
     library.close();
     await new Promise(resolve => server.close(resolve));
     if (!root.startsWith(join(tmpdir(), 'infobox-test-'))) throw new Error('Unsafe test cleanup path');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('rejects cross-origin writes and returns stable error codes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'infobox-origin-'));
+  const library = new Library({ root });
+  await library.init({ watchInbox: false });
+  const server = createApi(library);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const rejected = await fetch(`${base}/api/views`, {
+      method: 'POST',
+      headers: { origin: 'https://attacker.example', 'content-type': 'text/plain' },
+      body: JSON.stringify({ name: 'cross-origin-write' }),
+    });
+    assert.equal(rejected.status, 403);
+    assert.equal((await rejected.json()).code, 'FORBIDDEN_ORIGIN');
+    assert.equal((await library.savedViews()).length, 0);
+
+    const health = await fetch(`${base}/health`);
+    assert.equal(health.headers.get('x-content-type-options'), 'nosniff');
+    assert.equal(health.headers.get('cross-origin-resource-policy'), 'same-origin');
+  } finally {
+    library.close();
+    await new Promise(resolve => server.close(resolve));
+    if (!root.startsWith(join(tmpdir(), 'infobox-origin-'))) throw new Error('Unsafe test cleanup path');
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -746,6 +804,191 @@ test('one-shot run handles current inbox and exits without a watcher', async () 
   } finally {
     library.close();
     if (!root.startsWith(join(tmpdir(), 'infobox-test-'))) throw new Error('Unsafe test cleanup path');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('JSON storage writes atomically, serializes updates, and recovers an interrupted replacement', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'infobox-storage-'));
+  const path = join(root, 'records.json');
+  try {
+    await writeJsonFile(path, []);
+    await Promise.all(Array.from({ length: 20 }, (_, index) => updateJsonArray(path, records => { records.push(index); })));
+    assert.equal((await readJsonArray(path)).length, 20);
+
+    await rename(path, `${path}.backup`);
+    assert.deepEqual(await readJsonFile(path), Array.from({ length: 20 }, (_, index) => index));
+    assert.equal(await stat(`${path}.backup`).then(() => true, () => false), false);
+
+    await writeFile(path, '{not valid json');
+    await assert.rejects(readJsonFile(path), error => error.code === 'CORRUPT_JSON');
+
+    const textPath = join(root, 'note.md');
+    await writeFile(`${textPath}.backup`, 'recoverable note');
+    await recoverPendingWrites(root);
+    assert.equal(await readFile(textPath, 'utf8'), 'recoverable note');
+  } finally {
+    if (!root.startsWith(join(tmpdir(), 'infobox-storage-'))) throw new Error('Unsafe test cleanup path');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('preserves JSON and TXT originals separately from metadata and extracted text', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'infobox-originals-'));
+  const library = new Library({ root,
+    analyze: async extracted => ({ title: `${extracted.title}-stored`, summary: '摘要', category: 'Data/Text', tags: [], published_at: null, needs_review: false, review_reason: '' }),
+    decide: async (_, analysis) => ({ category: analysis.category, tags: analysis.tags, needs_review: false, provider: 'test' }),
+  });
+  try {
+    await library.init({ watchInbox: false });
+    const originals = new Map([
+      ['sample.json', '{\n  "hello": "world"\n}\n'],
+      ['sample.txt', 'line one\n\n    line two\n'],
+    ]);
+    for (const [name, content] of originals) {
+      const path = join(library.inbox, name);
+      await writeFile(path, content);
+      await library.enqueue(path);
+      await library.chain;
+    }
+    const items = await library.items();
+    assert.equal(items.length, 2);
+    for (const item of items) {
+      const original = originals.get(item.original_name);
+      assert.ok(original);
+      assert.notEqual(item.asset_path, item.metadata_path);
+      assert.match(item.asset_path, /\.source\.(json|txt)$/);
+      assert.equal(await readFile(item.asset_path, 'utf8'), original);
+      const updated = await library.patchItem(item.id, { title: `${item.title}-renamed` });
+      assert.equal(updated.id, item.id);
+      assert.match(updated.asset_path, /\.source\.(json|txt)$/);
+      assert.equal(await readFile(updated.asset_path, 'utf8'), original);
+    }
+  } finally {
+    library.close();
+    if (!root.startsWith(join(tmpdir(), 'infobox-originals-'))) throw new Error('Unsafe test cleanup path');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('rolls back a partially failed material rename', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'infobox-rollback-'));
+  const library = new Library({ root,
+    analyze: async () => ({ title: 'Original', summary: '摘要', category: 'AI', tags: [], published_at: null, needs_review: false, review_reason: '' }),
+    decide: async (_, analysis) => ({ category: analysis.category, tags: analysis.tags, needs_review: false, provider: 'test' }),
+  });
+  try {
+    await library.init({ watchInbox: false });
+    const input = join(library.inbox, 'original.png');
+    await writeFile(input, 'image bytes');
+    const job = await library.enqueue(input);
+    await library.chain;
+    const before = (await library.items()).find(item => item.id === job.id);
+    const blockedSummary = join(root, 'library', 'AI', `${before.received_at.slice(0, 7)}-Renamed.summary.md`);
+    await mkdir(blockedSummary);
+
+    await assert.rejects(library.patchItem(job.id, { title: 'Renamed' }));
+    const after = (await library.items()).find(item => item.id === job.id);
+    assert.equal(after.title, before.title);
+    assert.equal(after.asset_path, before.asset_path);
+    assert.equal(await readFile(after.asset_path, 'utf8'), 'image bytes');
+    assert.equal(await stat(before.metadata_path).then(() => true, () => false), true);
+  } finally {
+    library.close();
+    if (!root.startsWith(join(tmpdir(), 'infobox-rollback-'))) throw new Error('Unsafe test cleanup path');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('one-shot run handles extended formats and submitted temporary notes', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'infobox-once-extended-'));
+  const library = new Library({ root,
+    analyze: async extracted => ({ title: extracted.title || 'Note', summary: '摘要', category: 'Notes', tags: [], published_at: null, needs_review: false, review_reason: '' }),
+    decide: async (_, analysis) => ({ category: analysis.category, tags: analysis.tags, needs_review: false, provider: 'test' }),
+  });
+  try {
+    await library.init({ watchInbox: false });
+    await writeFile(join(library.inbox, 'document.md'), '# Markdown content');
+    const note = await library.createTemporaryNote({ title: 'Temporary', content: 'Temporary note content' });
+    await library.submitTemporaryNote(note.id);
+    const { results, skipped } = await processInbox(library);
+    assert.equal(results.length, 2);
+    assert.deepEqual(skipped, []);
+    assert.ok(results.every(job => job.status === 'ready'));
+    assert.equal((await library.temporaryNotes()).length, 0);
+  } finally {
+    library.close();
+    if (!root.startsWith(join(tmpdir(), 'infobox-once-extended-'))) throw new Error('Unsafe test cleanup path');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('moves library notes, temporary notes, and inbox files through the recycle bin', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'infobox-trash-items-'));
+  const library = new Library({ root });
+  try {
+    await library.init({ watchInbox: false });
+    const source = await library.createLibraryNote({ title: 'Source note', category: 'Notes', content: '# Source\n\nKeep this text.' });
+    const related = await library.createLibraryNote({ title: 'Related note', category: 'Notes', content: 'Related' });
+    await library.addRelation({ source_id: source.id, target_id: related.id, type: 'related' });
+
+    const removed = await library.deleteItem(source.id);
+    assert.ok(removed.trash_id);
+    assert.equal((await library.items()).some(item => item.id === source.id), false);
+    assert.equal((await library.relations()).length, 0);
+    assert.equal((await library.trashEntries()).some(entry => entry.id === removed.trash_id && entry.kind === 'note'), true);
+
+    await library.restoreTrashEntry(removed.trash_id);
+    const restored = (await library.items()).find(item => item.id === source.id);
+    assert.equal((await library.noteContent(restored.id)).content, '# Source\n\nKeep this text.');
+    assert.equal((await library.relations()).length, 1);
+
+    const draft = await library.createTemporaryNote({ title: 'Draft', content: 'Draft text' });
+    const deletedDraft = await library.deleteTemporaryNote(draft.id);
+    assert.equal((await library.temporaryNotes()).length, 0);
+    await library.restoreTrashEntry(deletedDraft.trash_id);
+    assert.equal((await library.temporaryNotes()).some(note => note.id === draft.id), true);
+
+    await writeFile(join(library.inbox, 'waiting.txt'), 'waiting');
+    await library.deleteInboxFile('waiting.txt');
+    const inboxEntry = (await library.trashEntries()).find(entry => entry.title === 'waiting.txt');
+    assert.ok(inboxEntry);
+    assert.equal(await stat(join(library.inbox, 'waiting.txt')).then(() => true, () => false), false);
+    await library.restoreTrashEntry(inboxEntry.id);
+    assert.equal(await readFile(join(library.inbox, 'waiting.txt'), 'utf8'), 'waiting');
+  } finally {
+    library.close();
+    if (!root.startsWith(join(tmpdir(), 'infobox-trash-items-'))) throw new Error('Unsafe test cleanup path');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('moves folder trees to trash, restores them, and supports permanent deletion', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'infobox-trash-folder-'));
+  const library = new Library({ root });
+  try {
+    await library.init({ watchInbox: false });
+    await library.addFolder({ name: 'Projects' });
+    await library.addFolder({ name: 'Archive', parent: 'Projects' });
+    const note = await library.createLibraryNote({ title: 'Archived note', category: 'Projects/Archive', content: 'Recover me' });
+
+    const removed = await library.deleteFolder('Projects');
+    assert.equal(removed.kind, 'folder');
+    assert.equal(removed.item_count, 1);
+    assert.equal((await library.items()).some(item => item.id === note.id), false);
+    assert.equal((await library.categories()).some(path => path === 'Projects' || path.startsWith('Projects/')), false);
+
+    await library.restoreTrashEntry(removed.id);
+    assert.equal((await library.items()).some(item => item.id === note.id), true);
+    assert.equal((await library.folders()).includes('Projects/Archive'), true);
+
+    const removedAgain = await library.deleteFolder('Projects');
+    await library.permanentlyDeleteTrashEntry(removedAgain.id);
+    assert.equal((await library.trashEntries()).some(entry => entry.id === removedAgain.id), false);
+    assert.equal(await library.restoreTrashEntry(removedAgain.id), null);
+  } finally {
+    library.close();
+    if (!root.startsWith(join(tmpdir(), 'infobox-trash-folder-'))) throw new Error('Unsafe test cleanup path');
     await rm(root, { recursive: true, force: true });
   }
 });

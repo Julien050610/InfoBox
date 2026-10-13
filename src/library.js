@@ -5,14 +5,25 @@ import { basename, dirname, extname, join, resolve } from 'node:path';
 import { ZipFile } from 'yazl';
 import { analyzeContent, decideWithJev, proposeRestructure } from './models.js';
 import { extractFile } from './extract.js';
+import { readJsonArray, readJsonFile, recoverPendingWrites, updateJsonArray, writeJsonFile, writeTextFile } from './storage/local-json-store.js';
+import { TrashStore } from './storage/trash-store.js';
+import { VaultRepository } from './vault/vault-repository.js';
 
 const safePart = value => String(value || '').normalize('NFKC').replace(/[<>:"/\\|?*\x00-\x1f]/g, '-').replace(/[. ]+$/g, '').trim().slice(0, 80);
-const json = value => `${JSON.stringify(value, null, 2)}\n`;
 const exists = async path => access(path).then(() => true, () => false);
 const metadataBase = path => path.slice(0, -5);
 const summaryPath = path => `${metadataBase(path)}.summary.md`;
 const textPath = path => `${metadataBase(path)}.txt`;
 const assetsPath = path => `${metadataBase(path)}.assets`;
+const reservedAssetExtensions = new Set(['.json', '.txt']);
+const assetSuffix = extension => reservedAssetExtensions.has(extension.toLowerCase()) ? `.source${extension.toLowerCase()}` : extension.toLowerCase();
+const newAssetPath = (folder, stem, extension) => join(folder, `${stem}${assetSuffix(extension)}`);
+const existingAssetSuffix = (assetPath, metadataPath) => {
+  const name = basename(assetPath || '');
+  const stem = basename(metadataPath, '.json');
+  if (resolve(assetPath || '') === resolve(metadataPath)) return assetSuffix(extname(assetPath));
+  return name.startsWith(stem) && name.length > stem.length ? name.slice(stem.length) : assetSuffix(extname(assetPath) || '.url');
+};
 export const SUPPORTED_INBOX_EXTENSIONS = new Set([
   '.pdf', '.jpg', '.jpeg', '.png', '.webp', '.gif', '.url', '.webloc',
   '.md', '.markdown', '.txt', '.docx', '.pptx', '.xlsx', '.epub', '.html', '.htm',
@@ -24,6 +35,38 @@ export const SUPPORTED_INBOX_EXTENSIONS = new Set([
 const READING_STATUSES = new Set(['unread', 'reading', 'read']);
 const RELATION_TYPES = new Set(['related', 'cites', 'supports', 'contradicts', 'follow_up']);
 
+function vaultRecordToItem(record) {
+  const metadata = record.metadata || {};
+  return {
+    ...metadata,
+    id: record.id,
+    kind: metadata.type || 'note',
+    status: metadata.status === 'review' ? 'review' : 'ready',
+    vault_status: metadata.status || 'processed',
+    title: String(metadata.title || '未命名笔记'),
+    category: String(metadata.category || '未分类'),
+    tags: Array.isArray(metadata.tags) ? metadata.tags : [],
+    summary: String(metadata.summary || ''),
+    quality_score: Number.isInteger(metadata.quality_score) ? metadata.quality_score : null,
+    published_at: metadata.published_at || null,
+    received_at: String(metadata.received_at || metadata.created_at || new Date(0).toISOString()).slice(0, 10),
+    original_name: metadata.original_name || `${metadata.title || record.id}.md`,
+    source_url: metadata.source_url || null,
+    summary_basis: metadata.summary_basis || 'user_note',
+    bound_item_id: metadata.bound_item_id || null,
+    anchor: metadata.anchor || null,
+    favorite: Boolean(metadata.favorite),
+    reading_status: READING_STATUSES.has(metadata.reading_status) ? metadata.reading_status : 'unread',
+    last_opened_at: metadata.last_opened_at || null,
+    reading_progress: Number.isFinite(metadata.reading_progress) ? Math.max(0, Math.min(1, metadata.reading_progress)) : null,
+    reading_position: normalizeReadingAnchor(metadata.reading_position, { allowView: true }),
+    storage: 'vault',
+    asset_path: record.path,
+    metadata_path: null,
+    vault_revision: record.revision,
+  };
+}
+
 function normalizeReadingAnchor(anchor, { allowView = false } = {}) {
   const type = anchor?.type;
   const x = Number(anchor?.x);
@@ -33,13 +76,6 @@ function normalizeReadingAnchor(anchor, { allowView = false } = {}) {
   const normalized = { type, x, y, ...(type === 'pdf' ? { page } : {}) };
   if (allowView && ['asset', 'markdown'].includes(anchor?.view)) normalized.view = anchor.view;
   return normalized;
-}
-
-async function readJsonArray(path) {
-  return JSON.parse(await readFile(path, 'utf8').catch(error => {
-    if (error.code === 'ENOENT') return '[]';
-    throw error;
-  }));
 }
 
 function publicationDate(value) {
@@ -72,7 +108,7 @@ async function scanJson(directory) {
   for (const entry of await readdir(directory, { withFileTypes: true })) {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) found.push(...await scanJson(path));
-    else if (entry.name.endsWith('.json')) found.push(path);
+    else if (entry.name.endsWith('.json') && !entry.name.endsWith('.source.json')) found.push(path);
   }
   return found;
 }
@@ -91,6 +127,9 @@ export class Library {
     this.relationsFile = join(this.root, 'data', 'relations.json');
     this.foldersFile = join(this.root, 'data', 'folders.json');
     this.restructureHistoryFile = join(this.root, 'data', 'restructure-history.json');
+    this.vaultMigrationsDirectory = join(this.root, 'data', 'vault-migrations');
+    this.vault = new VaultRepository({ root: options.vaultRoot || process.env.VAULT_DIR || join(this.root, 'vault') });
+    this.trashStore = new TrashStore(this.root);
     this.analyze = options.analyze || analyzeContent;
     this.decide = options.decide || decideWithJev;
     this.restructure = options.restructure || proposeRestructure;
@@ -98,10 +137,14 @@ export class Library {
     this.chain = Promise.resolve();
     this.watcher = null;
     this.timers = new Map();
+    this.vaultChangedAt = null;
   }
 
-  async init({ watchInbox = true } = {}) {
-    await Promise.all([this.inbox, this.library, this.review, this.jobs, this.notesDirectory, this.temporaryNotesDirectory, this.bookmarksDirectory].map(path => mkdir(path, { recursive: true })));
+  async init({ watchInbox = true, watchVault = watchInbox } = {}) {
+    await Promise.all([this.inbox, this.library, this.review, this.jobs, this.notesDirectory, this.temporaryNotesDirectory, this.bookmarksDirectory, this.vaultMigrationsDirectory].map(path => mkdir(path, { recursive: true })));
+    await Promise.all([this.trashStore.init(), this.vault.init()]);
+    await Promise.all([this.library, this.review, join(this.root, 'data')].map(recoverPendingWrites));
+    if (watchVault) this.vault.watch(() => { this.vaultChangedAt = new Date().toISOString(); });
     if (watchInbox) {
       this.watcher = watch(this.inbox, (_, name) => {
         if (name) this.schedule(name.toString());
@@ -112,6 +155,7 @@ export class Library {
 
   close() {
     this.watcher?.close();
+    this.vault.close();
     for (const timer of this.timers.values()) clearTimeout(timer);
   }
 
@@ -139,13 +183,13 @@ export class Library {
     return job;
   }
 
-  async writeJob(job) { await writeFile(join(this.jobs, `${job.id}.json`), json(job)); }
-  async getJob(id) { return JSON.parse(await readFile(join(this.jobs, `${id}.json`), 'utf8')); }
+  async writeJob(job) { await writeJsonFile(join(this.jobs, `${job.id}.json`), job); }
+  async getJob(id) { return readJsonFile(join(this.jobs, `${id}.json`)); }
 
   async items() {
     const paths = [...await scanJson(this.library), ...await scanJson(this.review)];
-    const items = await Promise.all(paths.map(async path => {
-      const item = JSON.parse(await readFile(path, 'utf8'));
+    const legacyItems = await Promise.all(paths.map(async path => {
+      const item = await readJsonFile(path);
       return {
         ...item,
         favorite: Boolean(item.favorite),
@@ -156,7 +200,10 @@ export class Library {
         metadata_path: path,
       };
     }));
-    return items.sort((a, b) => b.received_at.localeCompare(a.received_at));
+    const vaultItems = (await this.vault.list()).map(vaultRecordToItem);
+    const vaultIds = new Set(vaultItems.map(item => item.id));
+    return [...vaultItems, ...legacyItems.filter(item => !vaultIds.has(item.id))]
+      .sort((a, b) => String(b.received_at || '').localeCompare(String(a.received_at || '')));
   }
 
   async search(query) {
@@ -165,8 +212,10 @@ export class Library {
     const terms = source.split(/\s+/).filter(Boolean).slice(0, 12);
     const results = [];
     for (const item of await this.items()) {
-      const textPath = item.metadata_path.slice(0, -5) + '.txt';
-      const fullText = await readFile(textPath, 'utf8').catch(error => error.code === 'ENOENT' ? '' : Promise.reject(error));
+      const cachedTextPath = item.storage === 'vault' ? null : item.metadata_path.slice(0, -5) + '.txt';
+      const fullText = item.storage === 'vault'
+        ? (await this.vault.read(item.id))?.content || ''
+        : await readFile(cachedTextPath, 'utf8').catch(error => error.code === 'ENOENT' ? '' : Promise.reject(error));
       const fields = {
         title: String(item.title || '').toLocaleLowerCase('zh-CN'),
         tags: (item.tags || []).join(' ').toLocaleLowerCase('zh-CN'),
@@ -200,7 +249,6 @@ export class Library {
   async addSavedView(payload) {
     const name = String(payload?.name || '').trim().slice(0, 80);
     if (!name) throw new Error('Saved view name is required');
-    const views = await this.savedViews();
     const view = {
       id: randomUUID(), name,
       query: String(payload.query || '').slice(0, 500),
@@ -209,18 +257,16 @@ export class Library {
       filters: payload.filters && typeof payload.filters === 'object' && !Array.isArray(payload.filters) ? payload.filters : {},
       created_at: new Date().toISOString(),
     };
-    views.push(view);
-    await writeFile(this.savedViewsFile, json(views));
+    await updateJsonArray(this.savedViewsFile, views => { views.push(view); });
     return view;
   }
 
   async deleteSavedView(id) {
-    const views = await this.savedViews();
-    const index = views.findIndex(view => view.id === id);
-    if (index < 0) return null;
-    const [removed] = views.splice(index, 1);
-    await writeFile(this.savedViewsFile, json(views));
-    return removed;
+    return updateJsonArray(this.savedViewsFile, views => {
+      const index = views.findIndex(view => view.id === id);
+      if (index < 0) return null;
+      return views.splice(index, 1)[0];
+    });
   }
 
   async relations() { return readJsonArray(this.relationsFile); }
@@ -232,22 +278,21 @@ export class Library {
     if (!sourceId || !targetId || sourceId === targetId) throw new Error('Relation requires two different items');
     const ids = new Set((await this.items()).map(item => item.id));
     if (!ids.has(sourceId) || !ids.has(targetId)) throw new Error('Related item not found');
-    const relations = await this.relations();
-    const duplicate = relations.find(relation => ((relation.source_id === sourceId && relation.target_id === targetId) || (relation.source_id === targetId && relation.target_id === sourceId)) && relation.type === type);
-    if (duplicate) return duplicate;
-    const relation = { id: randomUUID(), source_id: sourceId, target_id: targetId, type, created_at: new Date().toISOString() };
-    relations.push(relation);
-    await writeFile(this.relationsFile, json(relations));
-    return relation;
+    return updateJsonArray(this.relationsFile, relations => {
+      const duplicate = relations.find(relation => ((relation.source_id === sourceId && relation.target_id === targetId) || (relation.source_id === targetId && relation.target_id === sourceId)) && relation.type === type);
+      if (duplicate) return duplicate;
+      const relation = { id: randomUUID(), source_id: sourceId, target_id: targetId, type, created_at: new Date().toISOString() };
+      relations.push(relation);
+      return relation;
+    });
   }
 
   async deleteRelation(id) {
-    const relations = await this.relations();
-    const index = relations.findIndex(relation => relation.id === id);
-    if (index < 0) return null;
-    const [removed] = relations.splice(index, 1);
-    await writeFile(this.relationsFile, json(relations));
-    return removed;
+    return updateJsonArray(this.relationsFile, relations => {
+      const index = relations.findIndex(relation => relation.id === id);
+      if (index < 0) return null;
+      return relations.splice(index, 1)[0];
+    });
   }
 
   async folders() {
@@ -285,8 +330,85 @@ export class Library {
     folders.push(path);
     folders.sort((a, b) => a.localeCompare(b, 'zh-CN'));
     await mkdir(join(this.library, ...path.split('/')), { recursive: true });
-    await writeFile(this.foldersFile, json(folders));
+    await writeJsonFile(this.foldersFile, folders);
     return { name, parent, path };
+  }
+
+  async deleteFolder(value) {
+    const path = this.normalizeCategory(value);
+    const categories = await this.categories();
+    if (!categories.includes(path)) return null;
+    const folderPath = resolve(join(this.library, ...path.split('/')));
+    if (!folderPath.startsWith(`${resolve(this.library)}\\`) && !folderPath.startsWith(`${resolve(this.library)}/`)) throw new Error('Folder is outside the library');
+    const items = (await this.items()).filter(item => item.status === 'ready' && (item.category === path || item.category.startsWith(`${path}/`)));
+    const folders = await this.folders();
+    const removedFolders = folders.filter(folder => folder === path || folder.startsWith(`${path}/`));
+    const itemIds = new Set(items.map(item => item.id));
+    const relations = await this.relations();
+    const removedRelations = relations.filter(relation => itemIds.has(relation.source_id) || itemIds.has(relation.target_id));
+    const auxiliaryPaths = items.flatMap(item => [
+      join(this.notesDirectory, `${item.id}.json`),
+      join(this.bookmarksDirectory, `${item.id}.json`),
+      join(this.jobs, `${item.id}.json`),
+    ]);
+    const vaultPaths = items.filter(item => item.storage === 'vault').flatMap(item => [
+      item.asset_path,
+      this.vault.attachmentDirectory(item.id),
+      this.vaultMigrationPath(item.id),
+    ]);
+    const entry = await this.trashStore.put({
+      kind: 'folder',
+      title: path.split('/').at(-1),
+      paths: [folderPath, ...vaultPaths, ...auxiliaryPaths],
+      itemIds: [...itemIds],
+      folderEntries: removedFolders,
+      relations: removedRelations,
+      originalLocation: path,
+    });
+    if (!entry) return null;
+    try {
+      await writeJsonFile(this.foldersFile, folders.filter(folder => !removedFolders.includes(folder)));
+      if (removedRelations.length) await writeJsonFile(this.relationsFile, relations.filter(relation => !removedRelations.includes(relation)));
+    } catch (error) {
+      await this.trashStore.restore(entry.id).catch(() => {});
+      await writeJsonFile(this.foldersFile, folders).catch(() => {});
+      await writeJsonFile(this.relationsFile, relations).catch(() => {});
+      throw error;
+    }
+    return entry;
+  }
+
+  async trashEntries() { return this.trashStore.list(); }
+
+  async restoreTrashEntry(id) {
+    const manifest = await this.trashStore.restore(id);
+    if (!manifest) return null;
+    if (manifest.folder_entries?.length) {
+      await updateJsonArray(this.foldersFile, folders => {
+        folders.push(...manifest.folder_entries.filter(path => !folders.includes(path)));
+        folders.sort((a, b) => a.localeCompare(b, 'zh-CN'));
+      });
+    }
+    if (manifest.relations?.length) {
+      await updateJsonArray(this.relationsFile, relations => {
+        const ids = new Set(relations.map(relation => relation.id));
+        relations.push(...manifest.relations.filter(relation => !ids.has(relation.id)));
+      });
+    }
+    return { id: manifest.id, kind: manifest.kind, title: manifest.title };
+  }
+
+  async permanentlyDeleteTrashEntry(id) {
+    const manifest = await this.trashStore.permanentlyDelete(id);
+    if (!manifest) return null;
+    const itemIds = new Set(manifest.item_ids || []);
+    if (itemIds.size) {
+      await updateJsonArray(this.relationsFile, relations => {
+        const remaining = relations.filter(relation => !itemIds.has(relation.source_id) && !itemIds.has(relation.target_id));
+        relations.splice(0, relations.length, ...remaining);
+      });
+    }
+    return { id: manifest.id, kind: manifest.kind, title: manifest.title };
   }
 
   async restructureHistory() {
@@ -294,7 +416,7 @@ export class Library {
   }
 
   async writeRestructureHistory(records) {
-    await writeFile(this.restructureHistoryFile, json(records));
+    await writeJsonFile(this.restructureHistoryFile, records);
   }
 
   normalizeCategory(value) {
@@ -369,7 +491,10 @@ export class Library {
     const scope = String(payload.scope || '').trim();
     if (scope && !(await this.categories()).includes(scope)) throw new Error('Restructure scope folder does not exist');
     let items = (await this.items()).filter(item => item.status === 'ready' && !(item.kind === 'note' && item.bound_item_id) && (!scope || item.category === scope || item.category.startsWith(`${scope}/`)));
-    items = await Promise.all(items.map(async item => item.kind === 'note' && !item.summary ? { ...item, summary: (await readFile(item.asset_path, 'utf8').catch(() => '')).slice(0, 1200) } : item));
+    items = await Promise.all(items.map(async item => item.kind === 'note' && !item.summary ? {
+      ...item,
+      summary: (item.storage === 'vault' ? (await this.vault.read(item.id))?.content || '' : await readFile(item.asset_path, 'utf8').catch(() => '')).slice(0, 1200),
+    } : item));
     if (!items.length) throw new Error('Restructure scope contains no items');
     const proposal = await this.restructure(items, { categories: await this.categories(), scope });
     const changes = this.proposalChanges(items, proposal);
@@ -439,7 +564,10 @@ export class Library {
     if (normalized.some(scope => scope && !categories.includes(scope))) throw new Error('Restructure scope folder does not exist');
     const scopes = normalized.filter(scope => !normalized.some(parent => parent !== scope && (!parent || scope.startsWith(`${parent}/`))));
     let items = (await this.items()).filter(item => item.status === 'ready' && !(item.kind === 'note' && item.bound_item_id) && scopes.some(scope => !scope || item.category === scope || item.category.startsWith(`${scope}/`)));
-    items = await Promise.all(items.map(async item => item.kind === 'note' && !item.summary ? { ...item, summary: (await readFile(item.asset_path, 'utf8').catch(() => '')).slice(0, 1200) } : item));
+    items = await Promise.all(items.map(async item => item.kind === 'note' && !item.summary ? {
+      ...item,
+      summary: (item.storage === 'vault' ? (await this.vault.read(item.id))?.content || '' : await readFile(item.asset_path, 'utf8').catch(() => '')).slice(0, 1200),
+    } : item));
     if (!items.length) throw new Error('Selected folders contain no items');
     const withinScopes = path => scopes.some(scope => !scope || path === scope || path.startsWith(`${scope}/`));
     const discardedFolders = categories.filter(withinScopes);
@@ -475,14 +603,14 @@ export class Library {
     const history = await readJsonArray(this.restructureHistoryFile);
     history.push(record);
     try {
-      await writeFile(this.foldersFile, json(foldersAfter));
-      await writeFile(this.savedViewsFile, json(views));
+      await writeJsonFile(this.foldersFile, foldersAfter);
+      await writeJsonFile(this.savedViewsFile, views);
       for (const path of [...discardedFolders].sort((a, b) => b.split('/').length - a.split('/').length)) await rmdir(join(this.library, ...path.split('/'))).catch(() => {});
       await this.writeRestructureHistory(history);
     } catch (error) {
       await this.moveItems([...changes].reverse(), 'reverse').catch(() => {});
-      await writeFile(this.foldersFile, json(foldersBefore)).catch(() => {});
-      await writeFile(this.savedViewsFile, json(viewsBefore)).catch(() => {});
+      await writeJsonFile(this.foldersFile, foldersBefore).catch(() => {});
+      await writeJsonFile(this.savedViewsFile, viewsBefore).catch(() => {});
       for (const path of [...snapshot.folders, ...snapshot.items.map(item => item.category)]) await mkdir(join(this.library, ...path.split('/')), { recursive: true }).catch(() => {});
       throw error;
     }
@@ -515,18 +643,18 @@ export class Library {
     const snapshot = await this.structureSnapshot();
     await this.moveItems(changes);
     try {
-      await writeFile(this.foldersFile, json(foldersAfter));
+      await writeJsonFile(this.foldersFile, foldersAfter);
       for (const change of viewChanges) {
         const view = views.find(value => value.id === change.id);
         if (view) view.category = change.to;
       }
-      await writeFile(this.savedViewsFile, json(views));
+      await writeJsonFile(this.savedViewsFile, views);
       await mkdir(join(this.library, ...target.split('/')), { recursive: true });
       for (const path of [...affectedPaths].sort((a, b) => b.length - a.length)) await rmdir(join(this.library, ...path.split('/'))).catch(() => {});
     } catch (error) {
       await this.moveItems(changes, 'reverse').catch(() => {});
-      await writeFile(this.foldersFile, json(foldersBefore)).catch(() => {});
-      await writeFile(this.savedViewsFile, json(viewsBefore)).catch(() => {});
+      await writeJsonFile(this.foldersFile, foldersBefore).catch(() => {});
+      await writeJsonFile(this.savedViewsFile, viewsBefore).catch(() => {});
       throw error;
     }
     const record = {
@@ -545,8 +673,8 @@ export class Library {
       await this.writeRestructureHistory(history);
     } catch (error) {
       await this.moveItems([...changes].reverse(), 'reverse').catch(() => {});
-      await writeFile(this.foldersFile, json(foldersBefore)).catch(() => {});
-      await writeFile(this.savedViewsFile, json(viewsBefore)).catch(() => {});
+      await writeJsonFile(this.foldersFile, foldersBefore).catch(() => {});
+      await writeJsonFile(this.savedViewsFile, viewsBefore).catch(() => {});
       throw error;
     }
     return record;
@@ -566,7 +694,7 @@ export class Library {
       await this.moveItems(restoreChanges, 'reverse');
       const generated = new Set(record.generated_folders || []);
       const folders = [...new Set((await this.folders()).filter(path => !generated.has(path)).concat(record.snapshot.folders || []))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
-      await writeFile(this.foldersFile, json(folders));
+      await writeJsonFile(this.foldersFile, folders);
       const views = await this.savedViews();
       for (const saved of record.snapshot.views || []) {
         const view = views.find(value => value.id === saved.id);
@@ -576,7 +704,7 @@ export class Library {
           if (saved.filters) view.filters = JSON.parse(JSON.stringify(saved.filters));
         }
       }
-      await writeFile(this.savedViewsFile, json(views));
+      await writeJsonFile(this.savedViewsFile, views);
       for (const path of [...folders, ...record.snapshot.items.map(item => item.category)]) await mkdir(join(this.library, ...path.split('/')), { recursive: true });
       for (const path of [...generated].sort((a, b) => b.split('/').length - a.split('/').length)) await rmdir(join(this.library, ...path.split('/'))).catch(() => {});
       record.status = 'undone';
@@ -602,13 +730,13 @@ export class Library {
       const { source, target, view_changes: viewChanges = [] } = record.folder_change;
       const folders = await this.folders();
       const restored = [...new Set(folders.map(path => path === target || path.startsWith(`${target}/`) ? `${source}${path.slice(target.length)}` : path).concat(source))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
-      await writeFile(this.foldersFile, json(restored));
+      await writeJsonFile(this.foldersFile, restored);
       const views = await this.savedViews();
       for (const change of viewChanges) {
         const view = views.find(value => value.id === change.id);
         if (view?.category === change.to) view.category = change.from;
       }
-      await writeFile(this.savedViewsFile, json(views));
+      await writeJsonFile(this.savedViewsFile, views);
       await mkdir(join(this.library, ...source.split('/')), { recursive: true });
       const targetPaths = (record.folder_change.folder_mapping || []).map(change => change.to).sort((a, b) => b.length - a.length);
       for (const path of targetPaths) await rmdir(join(this.library, ...path.split('/'))).catch(() => {});
@@ -621,12 +749,78 @@ export class Library {
 
   temporaryNotePath(id) { return join(this.temporaryNotesDirectory, String(id)); }
 
+  vaultMigrationPath(id) { return join(this.vaultMigrationsDirectory, `${String(id)}.json`); }
+
+  async legacyNoteForMigration(id) {
+    const paths = [...await scanJson(this.library), ...await scanJson(this.review)];
+    for (const path of paths) {
+      const item = await readJsonFile(path);
+      if (item.id === id && item.kind === 'note') return { ...item, metadata_path: path };
+    }
+    return null;
+  }
+
+  async previewNoteMigration(id) {
+    const item = await this.legacyNoteForMigration(id);
+    if (!item) return null;
+    return {
+      id: item.id,
+      title: item.title,
+      source_metadata_path: item.metadata_path,
+      source_content_path: item.asset_path,
+      target_markdown_path: this.vault.notePath(item.id),
+      target_attachments_path: this.vault.attachmentDirectory(item.id),
+      source_untouched: true,
+      rollback: '删除迁移生成的 Vault 副本后，原始 JSON 与 Markdown 会重新生效。',
+    };
+  }
+
+  async migrateNoteToVault(id) {
+    const item = await this.legacyNoteForMigration(id);
+    if (!item) return null;
+    if (item.status !== 'ready') throw new Error('Only approved library notes can be migrated to the vault');
+    if (await this.vault.exists(id)) throw new Error('Vault note already exists');
+    const content = await readFile(item.asset_path, 'utf8').catch(error => error.code === 'ENOENT' ? '' : Promise.reject(error));
+    const migratedContent = content.replace(/(\]\()assets\//g, `$1../attachments/${item.id}/`);
+    const metadata = { ...item };
+    delete metadata.metadata_path;
+    delete metadata.asset_path;
+    metadata.type = 'note';
+    delete metadata.kind;
+    metadata.status = item.status === 'review' ? 'review' : 'processed';
+    metadata.manual_tags = Array.isArray(item.tags) ? item.tags : [];
+    metadata.zotero_tags = Array.isArray(item.zotero_tags) ? item.zotero_tags : [];
+    metadata.agent_tags = Array.isArray(item.agent_tags) ? item.agent_tags : [];
+    try {
+      await this.vault.create(metadata, migratedContent);
+      await this.vault.copyAttachmentsFrom(id, assetsPath(item.metadata_path));
+      await writeJsonFile(this.vaultMigrationPath(id), {
+        id, created_at: new Date().toISOString(), source_metadata_path: item.metadata_path,
+        source_content_path: item.asset_path, source_untouched: true,
+      });
+    } catch (error) {
+      await this.vault.remove(id).catch(() => {});
+      throw error;
+    }
+    return vaultRecordToItem(await this.vault.read(id));
+  }
+
+  async rollbackNoteMigration(id) {
+    const manifestPath = this.vaultMigrationPath(id);
+    const manifest = await readJsonFile(manifestPath, null);
+    if (!manifest) return null;
+    if (!await exists(manifest.source_metadata_path)) throw new Error('Legacy migration source is missing; rollback stopped');
+    await this.vault.remove(id);
+    await rm(manifestPath, { force: true });
+    return this.legacyNoteForMigration(id);
+  }
+
   async temporaryNotes({ includeInbox = false } = {}) {
     const entries = await readdir(this.temporaryNotesDirectory, { withFileTypes: true }).catch(error => error.code === 'ENOENT' ? [] : Promise.reject(error));
     const notes = [];
     for (const entry of entries.filter(value => value.isDirectory())) {
       const path = join(this.temporaryNotesDirectory, entry.name, 'note.json');
-      const note = await readFile(path, 'utf8').then(JSON.parse).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
+      const note = await readJsonFile(path, null);
       if (note && (includeInbox || note.state !== 'inbox')) notes.push(note);
     }
     return notes.sort((a, b) => String(b.updated_at).localeCompare(String(a.updated_at)));
@@ -639,8 +833,8 @@ export class Library {
     const now = new Date().toISOString();
     const note = { id, kind: 'note', state: 'temporary', title, created_at: now, updated_at: now, anchor: null, bound_item_id: null };
     await mkdir(join(folder, 'assets'), { recursive: true });
-    await writeFile(join(folder, 'note.md'), String(payload.content || ''));
-    await writeFile(join(folder, 'note.json'), json(note));
+    await writeTextFile(join(folder, 'note.md'), String(payload.content || ''));
+    await writeJsonFile(join(folder, 'note.json'), note);
     return note;
   }
 
@@ -655,6 +849,16 @@ export class Library {
     if (payload.anchor != null && !anchor) throw new Error('Invalid note anchor');
     const id = randomUUID();
     const receivedAt = new Date().toISOString();
+    if (!boundItem) {
+      const record = await this.vault.create({
+        id, type: 'note', title, category, status: 'processed',
+        manual_tags: [], zotero_tags: [], agent_tags: [], summary: '', quality_score: null,
+        published_at: null, received_at: receivedAt.slice(0, 10), created_at: receivedAt,
+        original_name: `${title}.md`, source_url: null, summary_basis: 'user_note',
+        bound_item_id: null, anchor: null, favorite: false, reading_status: 'unread',
+      }, String(payload.content || ''));
+      return vaultRecordToItem(record);
+    }
     const folder = join(this.library, ...category.split('/'));
     await mkdir(folder, { recursive: true });
     let stem = `${receivedAt.slice(0, 7)}-${title}`;
@@ -668,10 +872,10 @@ export class Library {
       analysis_provider: null, analysis_model: null, decision_provider: null, decision_confidence: null, review_reason: '', extraction: null,
       corrected_text: null, bound_item_id: boundItemId, anchor,
     };
-    await writeFile(assetPath, String(payload.content || ''));
-    await writeFile(textPath(path), String(payload.content || ''));
-    await writeFile(path, json(item));
-    await writeFile(summaryPath(path), renderNote(item));
+    await writeTextFile(assetPath, String(payload.content || ''));
+    await writeTextFile(textPath(path), String(payload.content || ''));
+    await writeJsonFile(path, item);
+    await writeTextFile(summaryPath(path), renderNote(item));
     return item;
   }
 
@@ -680,12 +884,19 @@ export class Library {
     if (draft) return { type: 'temporary', note: draft, folder: this.temporaryNotePath(id), contentPath: join(this.temporaryNotePath(id), 'note.md'), assetsPath: join(this.temporaryNotePath(id), 'assets') };
     const item = (await this.items()).find(value => value.id === id && value.kind === 'note');
     if (!item) return null;
+    if (item.storage === 'vault') return {
+      type: 'vault', note: item, folder: this.vault.notesDirectory, contentPath: item.asset_path, assetsPath: this.vault.attachmentDirectory(id),
+    };
     return { type: 'library', note: item, folder: dirname(item.metadata_path), contentPath: item.asset_path, assetsPath: assetsPath(item.metadata_path) };
   }
 
   async noteContent(id) {
     const record = await this.noteRecord(id);
     if (!record) return null;
+    if (record.type === 'vault') {
+      const current = await this.vault.read(id);
+      return { note: vaultRecordToItem(current), content: current.content };
+    }
     return { note: record.note, content: await readFile(record.contentPath, 'utf8').catch(error => error.code === 'ENOENT' ? '' : Promise.reject(error)) };
   }
 
@@ -693,25 +904,35 @@ export class Library {
     const record = await this.noteRecord(id);
     if (!record) return null;
     if (!changes || typeof changes !== 'object' || Array.isArray(changes)) throw new Error('Notebook update must be an object');
-    if (Object.keys(changes).some(key => !['title', 'content'].includes(key))) throw new Error('Unsupported notebook field');
+    if (Object.keys(changes).some(key => !['title', 'content', 'expected_revision'].includes(key))) throw new Error('Unsupported notebook field');
     if ('content' in changes && (typeof changes.content !== 'string' || changes.content.length > 2_000_000)) throw new Error('Notebook content must be text under 2,000,000 characters');
     if (record.type === 'temporary') {
       if ('title' in changes) record.note.title = safePart(changes.title) || '未命名笔记';
-      if ('content' in changes) await writeFile(record.contentPath, changes.content);
+      if ('content' in changes) await writeTextFile(record.contentPath, changes.content);
       record.note.updated_at = new Date().toISOString();
-      await writeFile(join(record.folder, 'note.json'), json(record.note));
+      await writeJsonFile(join(record.folder, 'note.json'), record.note);
       return record.note;
+    }
+    if (record.type === 'vault') {
+      const metadata = {};
+      if ('title' in changes) metadata.title = safePart(changes.title) || '未命名笔记';
+      const saved = await this.vault.update(id, {
+        metadata,
+        ...('content' in changes ? { content: changes.content } : {}),
+        expectedRevision: changes.expected_revision,
+      });
+      return vaultRecordToItem(saved);
     }
     const patch = {};
     if ('title' in changes) patch.title = changes.title;
     let item = Object.keys(patch).length ? await this.patchItem(id, patch) : record.note;
     if ('content' in changes) {
       const current = await this.noteRecord(id);
-      await writeFile(current.contentPath, changes.content);
-      await writeFile(textPath(current.note.metadata_path), changes.content);
+      await writeTextFile(current.contentPath, changes.content);
+      await writeTextFile(textPath(current.note.metadata_path), changes.content);
       const stored = { ...current.note, updated_at: new Date().toISOString() };
       delete stored.metadata_path;
-      await writeFile(current.note.metadata_path, json(stored));
+      await writeJsonFile(current.note.metadata_path, stored);
       item = stored;
     }
     return item;
@@ -720,6 +941,10 @@ export class Library {
   async addNotebookAsset(id, filename, bytes) {
     const record = await this.noteRecord(id);
     if (!record) return null;
+    if (record.type === 'vault') {
+      const attachment = await this.vault.addAttachment(id, filename, bytes);
+      return { name: attachment.name, markdown: `![${safePart(basename(filename, extname(filename))) || 'image'}](${attachment.relativePath})` };
+    }
     const extension = extname(filename).toLowerCase();
     if (!['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(extension)) throw new Error('Notebook images must be PNG, JPEG, GIF, or WebP');
     const base = safePart(basename(filename, extension)) || 'image';
@@ -747,15 +972,21 @@ export class Library {
     if (!content.trim()) throw new Error('Empty notes cannot be sent to the inbox');
     record.note.state = 'inbox';
     record.note.updated_at = new Date().toISOString();
-    await writeFile(join(record.folder, 'note.json'), json(record.note));
+    await writeJsonFile(join(record.folder, 'note.json'), record.note);
     return record.note;
   }
 
   async deleteTemporaryNote(id) {
     const record = await this.noteRecord(id);
     if (!record || record.type !== 'temporary') return null;
-    await rm(record.folder, { recursive: true, force: true });
-    return { id, title: record.note.title };
+    const entry = await this.trashStore.put({
+      kind: 'temporary-note',
+      title: record.note.title,
+      paths: [record.folder],
+      itemIds: [id],
+      originalLocation: '临时笔记',
+    });
+    return entry ? { id, title: record.note.title, trash_id: entry.id } : null;
   }
 
   async enqueueTemporaryNote(id) {
@@ -806,9 +1037,9 @@ export class Library {
         review_reason: uncertain ? decision.review_reason || '无法可靠判断笔记分类' : '', extraction: analysis.extraction || null, corrected_text: null,
         bound_item_id: null, anchor: null,
       };
-      await writeFile(metaPath, json(item));
-      await writeFile(textPath(metaPath), content);
-      await writeFile(summaryPath(metaPath), renderNote(item));
+      await writeJsonFile(metaPath, item);
+      await writeTextFile(textPath(metaPath), content);
+      await writeTextFile(summaryPath(metaPath), renderNote(item));
       await rm(record.folder, { recursive: true, force: true });
       job.status = item.status;
       job.item_id = id;
@@ -836,7 +1067,10 @@ export class Library {
   async notebookZip(id) {
     const record = await this.noteRecord(id);
     if (!record) return null;
-    const content = await readFile(record.contentPath);
+    const source = await readFile(record.contentPath, 'utf8');
+    const content = Buffer.from(record.type === 'vault'
+      ? source.replace(new RegExp(`(\\]\\()\\.\\.\\/attachments\\/${id}\\/`, 'g'), '$1assets/')
+      : source);
     const archive = new ZipFile();
     archive.addBuffer(content, `${safePart(record.note.title) || 'note'}.md`);
     for (const entry of await readdir(record.assetsPath, { withFileTypes: true }).catch(error => error.code === 'ENOENT' ? [] : Promise.reject(error))) {
@@ -910,8 +1144,8 @@ export class Library {
     if (this.pending.has(path)) throw new Error('Cannot delete a file while it is being classified');
     const details = await stat(path).catch(() => null);
     if (!details?.isFile()) return null;
-    await rm(path);
-    return { name };
+    const entry = await this.trashStore.put({ kind: 'inbox', title: name, paths: [path], originalLocation: '收件箱' });
+    return entry ? { name } : null;
   }
 
   async tree() {
@@ -950,75 +1184,63 @@ export class Library {
 
   async notesFor(id) {
     if (!(await this.items()).some(item => item.id === id)) return null;
-    return JSON.parse(await readFile(join(this.notesDirectory, `${id}.json`), 'utf8').catch(error => {
-      if (error.code === 'ENOENT') return '[]';
-      throw error;
-    }));
+    return readJsonArray(join(this.notesDirectory, `${id}.json`));
   }
 
   async addNote(id, anchor) {
-    const notes = await this.notesFor(id);
-    if (!notes) return null;
+    if (!(await this.items()).some(item => item.id === id)) return null;
     const normalizedAnchor = normalizeReadingAnchor(anchor);
     if (!normalizedAnchor) throw new Error('Invalid note anchor');
     const now = new Date().toISOString();
     const note = { id: randomUUID(), content: '', anchor: normalizedAnchor, created_at: now, updated_at: now };
-    notes.push(note);
-    await writeFile(join(this.notesDirectory, `${id}.json`), json(notes));
+    await updateJsonArray(join(this.notesDirectory, `${id}.json`), notes => { notes.push(note); });
     return note;
   }
 
   async updateNote(id, noteId, changes) {
-    const notes = await this.notesFor(id);
-    if (!notes) return null;
-    const note = notes.find(value => value.id === noteId);
-    if (!note) return null;
+    if (!(await this.items()).some(item => item.id === id)) return null;
     if (typeof changes?.content !== 'string' || changes.content.length > 20000) throw new Error('Note content must be text under 20,000 characters');
-    note.content = changes.content;
-    note.updated_at = new Date().toISOString();
-    await writeFile(join(this.notesDirectory, `${id}.json`), json(notes));
-    return note;
+    return updateJsonArray(join(this.notesDirectory, `${id}.json`), notes => {
+      const note = notes.find(value => value.id === noteId);
+      if (!note) return null;
+      note.content = changes.content;
+      note.updated_at = new Date().toISOString();
+      return note;
+    });
   }
 
   async deleteNote(id, noteId) {
-    const notes = await this.notesFor(id);
-    if (!notes) return null;
-    const index = notes.findIndex(value => value.id === noteId);
-    if (index < 0) return null;
-    const [removed] = notes.splice(index, 1);
-    await writeFile(join(this.notesDirectory, `${id}.json`), json(notes));
-    return removed;
+    if (!(await this.items()).some(item => item.id === id)) return null;
+    return updateJsonArray(join(this.notesDirectory, `${id}.json`), notes => {
+      const index = notes.findIndex(value => value.id === noteId);
+      if (index < 0) return null;
+      return notes.splice(index, 1)[0];
+    });
   }
 
   async bookmarksFor(id) {
     if (!(await this.items()).some(item => item.id === id)) return null;
-    return JSON.parse(await readFile(join(this.bookmarksDirectory, `${id}.json`), 'utf8').catch(error => {
-      if (error.code === 'ENOENT') return '[]';
-      throw error;
-    }));
+    return readJsonArray(join(this.bookmarksDirectory, `${id}.json`));
   }
 
   async addBookmark(id, payload = {}) {
-    const bookmarks = await this.bookmarksFor(id);
-    if (!bookmarks) return null;
+    if (!(await this.items()).some(item => item.id === id)) return null;
     const name = String(payload.name || '').trim();
     if (!name || name.length > 80) throw new Error('Bookmark name must contain 1 to 80 characters');
     const anchor = normalizeReadingAnchor(payload.anchor, { allowView: true });
     if (!anchor) throw new Error('Invalid bookmark anchor');
     const bookmark = { id: randomUUID(), name, anchor, created_at: new Date().toISOString() };
-    bookmarks.push(bookmark);
-    await writeFile(join(this.bookmarksDirectory, `${id}.json`), json(bookmarks));
+    await updateJsonArray(join(this.bookmarksDirectory, `${id}.json`), bookmarks => { bookmarks.push(bookmark); });
     return bookmark;
   }
 
   async deleteBookmark(id, bookmarkId) {
-    const bookmarks = await this.bookmarksFor(id);
-    if (!bookmarks) return null;
-    const index = bookmarks.findIndex(value => value.id === bookmarkId);
-    if (index < 0) return null;
-    const [removed] = bookmarks.splice(index, 1);
-    await writeFile(join(this.bookmarksDirectory, `${id}.json`), json(bookmarks));
-    return removed;
+    if (!(await this.items()).some(item => item.id === id)) return null;
+    return updateJsonArray(join(this.bookmarksDirectory, `${id}.json`), bookmarks => {
+      const index = bookmarks.findIndex(value => value.id === bookmarkId);
+      if (index < 0) return null;
+      return bookmarks.splice(index, 1)[0];
+    });
   }
 
   async findDuplicate(fingerprint) {
@@ -1043,7 +1265,7 @@ export class Library {
         const title = safePart(extracted.title || basename(path, extname(path))) || 'Untitled';
         const stem = `${receivedAt.slice(0, 7)}-${title}`;
         const extension = extracted.assetExtension || extname(path).toLowerCase();
-        const assetPath = join(folder, `${stem}${extension}`);
+        const assetPath = newAssetPath(folder, stem, extension);
         if (extracted.assetBuffer) await writeFile(assetPath, extracted.assetBuffer);
         else await copyFile(path, assetPath);
         const item = {
@@ -1056,9 +1278,9 @@ export class Library {
           corrected_text: null,
         };
         const metaPath = join(folder, `${stem}.json`);
-        await writeFile(metaPath, json(item));
-        await writeFile(join(folder, `${stem}.summary.md`), renderNote(item));
-        if (extracted.text) await writeFile(join(folder, `${stem}.txt`), extracted.text);
+        await writeJsonFile(metaPath, item);
+        await writeTextFile(join(folder, `${stem}.summary.md`), renderNote(item));
+        if (extracted.text) await writeTextFile(join(folder, `${stem}.txt`), extracted.text);
         await rm(path);
         job.status = 'review';
         job.item_id = item.id;
@@ -1087,7 +1309,7 @@ export class Library {
       let stem = `${datePrefix}-${title}`;
       if (await exists(join(folder, `${stem}.json`))) stem += `-${job.id.slice(0, 8)}`;
       const extension = extracted.assetExtension || extname(path).toLowerCase();
-      const assetPath = join(folder, `${stem}${extension}`);
+      const assetPath = newAssetPath(folder, stem, extension);
       if (extracted.assetBuffer) await writeFile(assetPath, extracted.assetBuffer);
       else await copyFile(path, assetPath);
       const item = {
@@ -1102,10 +1324,10 @@ export class Library {
         corrected_text: null,
       };
       const metaPath = join(folder, `${stem}.json`);
-      await writeFile(metaPath, json(item));
-      await writeFile(join(folder, `${stem}.summary.md`), renderNote(item));
+      await writeJsonFile(metaPath, item);
+      await writeTextFile(join(folder, `${stem}.summary.md`), renderNote(item));
       const text = extracted.text || [analysis.extraction?.description, analysis.extraction?.visible_text].filter(Boolean).join('\n\n');
-      if (text) await writeFile(join(folder, `${stem}.txt`), text);
+      if (text) await writeTextFile(join(folder, `${stem}.txt`), text);
       await rm(path);
       job.status = status;
       job.item_id = item.id;
@@ -1125,9 +1347,9 @@ export class Library {
         decision_provider: null, decision_confidence: null, review_reason: error.message,
         extraction: extracted?.metadata || null, corrected_text: null,
       };
-      await writeFile(join(folder, 'item.json'), json(item));
-      await writeFile(join(folder, 'item.summary.md'), renderNote(item));
-      if (extracted?.text) await writeFile(join(folder, 'item.txt'), extracted.text);
+      await writeJsonFile(join(folder, 'item.json'), item);
+      await writeTextFile(join(folder, 'item.summary.md'), renderNote(item));
+      if (extracted?.text) await writeTextFile(join(folder, 'item.txt'), extracted.text);
       job.status = 'review';
       job.error = error.message;
       job.item_id = item.id;
@@ -1138,6 +1360,7 @@ export class Library {
   async patchItem(id, changes) {
     const item = (await this.items()).find(value => value.id === id);
     if (!item) return null;
+    const originalItem = structuredClone(item);
     if (!changes || typeof changes !== 'object' || Array.isArray(changes)) throw new Error('Item update must be an object');
     const allowed = ['quality_score', 'title', 'summary', 'category', 'tags', 'published_at', 'corrected_text', 'favorite', 'reading_status', 'last_opened_at', 'reading_progress', 'reading_position'];
     if (Object.keys(changes).some(key => !allowed.includes(key))) throw new Error('Unsupported item field');
@@ -1164,7 +1387,7 @@ export class Library {
     if ('corrected_text' in changes) {
       if (typeof changes.corrected_text !== 'string' || changes.corrected_text.length > 100000) throw new Error('corrected_text must be text under 100,000 characters');
       item.corrected_text = changes.corrected_text.trim();
-      await writeFile(item.metadata_path.slice(0, -5) + '.txt', item.corrected_text);
+      if (item.storage !== 'vault') await writeTextFile(item.metadata_path.slice(0, -5) + '.txt', item.corrected_text);
     }
     if ('favorite' in changes) {
       if (typeof changes.favorite !== 'boolean') throw new Error('favorite must be a boolean');
@@ -1190,49 +1413,80 @@ export class Library {
         item.reading_position = position;
       }
     }
-    let path = previousPath;
-    if (item.status === 'ready' && (item.title !== previousTitle || item.category !== previousCategory)) {
-      const folder = item.category !== previousCategory ? join(this.library, ...item.category.split('/')) : dirname(previousPath);
-      await mkdir(folder, { recursive: true });
-      const extension = extname(item.asset_path || '') || '.url';
-      const baseStem = item.title !== previousTitle
-        ? `${(item.published_at || item.received_at).slice(0, 7)}-${safePart(item.title) || 'Untitled'}`
-        : basename(previousPath, '.json');
-      let stem = baseStem;
-      let counter = 0;
-      while ((await exists(join(folder, `${stem}.json`)) && join(folder, `${stem}.json`) !== previousPath) || (await exists(join(folder, `${stem}${extension}`)) && join(folder, `${stem}${extension}`) !== item.asset_path)) {
-        counter += 1;
-        stem = `${baseStem}-${id.slice(0, 8)}${counter > 1 ? `-${counter}` : ''}`;
+    if (item.storage === 'vault') {
+      const metadata = {};
+      for (const key of Object.keys(changes)) {
+        if (key === 'tags') metadata.manual_tags = item.tags;
+        else metadata[key] = item[key];
       }
-      path = join(folder, `${stem}.json`);
-      if (path !== previousPath) {
-        const assetPath = join(folder, `${stem}${extension}`);
-        if (!item.asset_path || !await exists(item.asset_path)) throw new Error('Original asset is missing');
-        if (assetPath !== item.asset_path) await rename(item.asset_path, assetPath);
-        item.asset_path = assetPath;
-        const previousText = textPath(previousPath);
-        const nextText = join(folder, `${stem}.txt`);
-        if (await exists(previousText) && previousText !== nextText) await rename(previousText, nextText);
-        const previousAssets = assetsPath(previousPath);
-        const nextAssets = join(folder, `${stem}.assets`);
-        if (await exists(previousAssets) && previousAssets !== nextAssets) await rename(previousAssets, nextAssets);
-        const previousSummary = summaryPath(previousPath);
-        const nextSummary = join(folder, `${stem}.summary.md`);
-        if (await exists(previousSummary) && previousSummary !== nextSummary) await rename(previousSummary, nextSummary);
-      }
+      const saved = await this.vault.update(id, { metadata, expectedRevision: item.vault_revision });
+      return vaultRecordToItem(saved);
     }
-    delete item.metadata_path;
-    await writeFile(path, json(item));
-    await writeFile(summaryPath(path), renderNote(item));
-    if (path !== previousPath) {
-      await rm(previousPath);
-      const previousLegacyNote = metadataBase(previousPath) + '.md';
-      if (previousLegacyNote !== item.asset_path && await exists(previousLegacyNote)) await rm(previousLegacyNote);
-      const job = await this.getJob(id).catch(() => null);
-      if (job) {
-        job.metadata_path = path;
-        await this.writeJob(job);
+    let path = previousPath;
+    const moved = [];
+    const moveExisting = async (from, to, required = false) => {
+      if (!from || !to) {
+        if (required) throw new Error('Original asset is missing');
+        return;
       }
+      if (from === to) return;
+      if (!await exists(from)) {
+        if (required) throw new Error('Original asset is missing');
+        return;
+      }
+      await rename(from, to);
+      moved.push({ from, to });
+    };
+    try {
+      if (item.status === 'ready' && (item.title !== previousTitle || item.category !== previousCategory)) {
+        const folder = item.category !== previousCategory ? join(this.library, ...item.category.split('/')) : dirname(previousPath);
+        await mkdir(folder, { recursive: true });
+        const suffix = existingAssetSuffix(item.asset_path, previousPath);
+        const baseStem = item.title !== previousTitle
+          ? `${(item.published_at || item.received_at).slice(0, 7)}-${safePart(item.title) || 'Untitled'}`
+          : basename(previousPath, '.json');
+        let stem = baseStem;
+        let counter = 0;
+        while ((await exists(join(folder, `${stem}.json`)) && join(folder, `${stem}.json`) !== previousPath) || (await exists(join(folder, `${stem}${suffix}`)) && join(folder, `${stem}${suffix}`) !== item.asset_path)) {
+          counter += 1;
+          stem = `${baseStem}-${id.slice(0, 8)}${counter > 1 ? `-${counter}` : ''}`;
+        }
+        path = join(folder, `${stem}.json`);
+        if (path !== previousPath) {
+          const assetPath = join(folder, `${stem}${suffix}`);
+          await moveExisting(item.asset_path, assetPath, true);
+          item.asset_path = assetPath;
+          await moveExisting(textPath(previousPath), join(folder, `${stem}.txt`));
+          await moveExisting(assetsPath(previousPath), join(folder, `${stem}.assets`));
+          await moveExisting(summaryPath(previousPath), join(folder, `${stem}.summary.md`));
+        }
+      }
+      delete item.metadata_path;
+      await writeJsonFile(path, item);
+      await writeTextFile(summaryPath(path), renderNote(item));
+      if (path !== previousPath) {
+        await rm(previousPath);
+        const previousLegacyNote = metadataBase(previousPath) + '.md';
+        if (previousLegacyNote !== item.asset_path && await exists(previousLegacyNote)) await rm(previousLegacyNote);
+        const job = await this.getJob(id).catch(() => null);
+        if (job) {
+          job.metadata_path = path;
+          await this.writeJob(job);
+        }
+      }
+    } catch (error) {
+      if (path !== previousPath) await rm(path, { force: true }).catch(() => {});
+      for (const change of moved.reverse()) {
+        if (await exists(change.to)) await rename(change.to, change.from).catch(() => {});
+      }
+      await writeJsonFile(previousPath, { ...originalItem, metadata_path: undefined }).catch(() => {});
+      await writeTextFile(summaryPath(previousPath), renderNote(originalItem)).catch(() => {});
+      const job = await this.getJob(id).catch(() => null);
+      if (job && job.metadata_path !== previousPath) {
+        job.metadata_path = previousPath;
+        await this.writeJob(job).catch(() => {});
+      }
+      throw error;
     }
     if (item.status === 'ready' && item.kind !== 'note' && item.category !== previousCategory) {
       const boundNotes = (await this.items()).filter(value => value.kind === 'note' && value.bound_item_id === item.id && value.category !== item.category);
@@ -1245,15 +1499,15 @@ export class Library {
     const folder = this.temporaryNotePath(item.id);
     await mkdir(folder, { recursive: true });
     if (item.asset_path && await exists(item.asset_path)) await rename(item.asset_path, join(folder, 'note.md'));
-    else await writeFile(join(folder, 'note.md'), '');
+    else await writeTextFile(join(folder, 'note.md'), '');
     const sourceAssets = assetsPath(item.metadata_path);
     if (await exists(sourceAssets)) await rename(sourceAssets, join(folder, 'assets'));
     else await mkdir(join(folder, 'assets'), { recursive: true });
     const now = new Date().toISOString();
-    await writeFile(join(folder, 'note.json'), json({
+    await writeJsonFile(join(folder, 'note.json'), {
       id: item.id, kind: 'note', state: 'inbox', title: item.title, created_at: item.created_at || now, updated_at: now,
       anchor: null, bound_item_id: null, detached_from: item.bound_item_id,
-    }));
+    });
     await Promise.all([
       rm(item.metadata_path, { force: true }), rm(textPath(item.metadata_path), { force: true }), rm(summaryPath(item.metadata_path), { force: true }),
     ]);
@@ -1265,6 +1519,37 @@ export class Library {
     if (item.kind !== 'note') {
       const boundNotes = (await this.items()).filter(value => value.kind === 'note' && value.bound_item_id === id);
       for (const note of boundNotes) await this.detachBoundNoteToInbox(note);
+    }
+    if (item.storage === 'vault') {
+      const migration = await readJsonFile(this.vaultMigrationPath(id), null);
+      const paths = new Set([
+        item.asset_path,
+        this.vault.attachmentDirectory(id),
+        join(this.notesDirectory, `${id}.json`),
+        join(this.bookmarksDirectory, `${id}.json`),
+        join(this.jobs, `${id}.json`),
+        migration ? this.vaultMigrationPath(id) : null,
+      ].filter(Boolean));
+      if (migration) {
+        paths.add(migration.source_metadata_path);
+        paths.add(migration.source_content_path);
+        paths.add(assetsPath(migration.source_metadata_path));
+        paths.add(textPath(migration.source_metadata_path));
+        paths.add(summaryPath(migration.source_metadata_path));
+      }
+      const relations = await this.relations();
+      const removedRelations = relations.filter(relation => relation.source_id === id || relation.target_id === id);
+      const entry = await this.trashStore.put({
+        kind: 'note', title: item.title, paths: [...paths], itemIds: [id], relations: removedRelations, originalLocation: item.category,
+      });
+      if (!entry) return null;
+      try {
+        if (removedRelations.length) await writeJsonFile(this.relationsFile, relations.filter(relation => !removedRelations.includes(relation)));
+      } catch (error) {
+        await this.trashStore.restore(entry.id).catch(() => {});
+        throw error;
+      }
+      return { ...item, trash_id: entry.id };
     }
     const metadataPath = resolve(item.metadata_path);
     const storageRoot = item.status === 'ready' ? resolve(this.library) : resolve(this.review);
@@ -1283,14 +1568,26 @@ export class Library {
       join(this.bookmarksDirectory, `${id}.json`),
       join(this.jobs, `${id}.json`),
     ].filter(Boolean));
-    for (const path of paths) await rm(path, { force: true });
-    if (item.kind === 'note') await rm(`${base}.assets`, { recursive: true, force: true });
+    if (item.kind === 'note') paths.add(`${base}.assets`);
     const legacySummary = `${base}.md`;
-    if (legacySummary !== assetPath) await rm(legacySummary, { force: true });
-
+    if (legacySummary !== assetPath) paths.add(legacySummary);
     const relations = await this.relations();
-    const remainingRelations = relations.filter(relation => relation.source_id !== id && relation.target_id !== id);
-    if (remainingRelations.length !== relations.length) await writeFile(this.relationsFile, json(remainingRelations));
+    const removedRelations = relations.filter(relation => relation.source_id === id || relation.target_id === id);
+    const entry = await this.trashStore.put({
+      kind: item.kind === 'note' ? 'note' : 'item',
+      title: item.title,
+      paths: [...paths],
+      itemIds: [item.id],
+      relations: removedRelations,
+      originalLocation: item.status === 'ready' ? item.category : '待检查',
+    });
+    if (!entry) return null;
+    try {
+      if (removedRelations.length) await writeJsonFile(this.relationsFile, relations.filter(relation => !removedRelations.includes(relation)));
+    } catch (error) {
+      await this.trashStore.restore(entry.id).catch(() => {});
+      throw error;
+    }
 
     let directory = dirname(metadataPath);
     while (directory !== storageRoot && (directory.startsWith(`${storageRoot}\\`) || directory.startsWith(`${storageRoot}/`))) {
@@ -1302,7 +1599,7 @@ export class Library {
       }
       directory = dirname(directory);
     }
-    return { id: item.id, title: item.title };
+    return { id: item.id, title: item.title, trash_id: entry.id };
   }
 
   async reanalyze(id) {
@@ -1326,8 +1623,8 @@ export class Library {
     updated.decision_provider = decision.provider || 'analysis_model';
     updated.decision_confidence = decision.confidence ?? null;
     updated.review_reason = decision.needs_review ? decision.review_reason || '仍需人工检查' : '';
-    await writeFile(updated.metadata_path, json({ ...updated, metadata_path: undefined }));
-    await writeFile(summaryPath(updated.metadata_path), renderNote(updated));
+    await writeJsonFile(updated.metadata_path, { ...updated, metadata_path: undefined });
+    await writeTextFile(summaryPath(updated.metadata_path), renderNote(updated));
     return decision.needs_review ? updated : this.approve(id);
   }
 
@@ -1346,7 +1643,7 @@ export class Library {
     const oldSummary = summaryPath(oldMeta);
     const oldLegacyNote = metadataBase(oldMeta) + '.md';
     const oldAssets = assetsPath(oldMeta);
-    const assetPath = join(folder, `${stem}${extname(item.asset_path || '') || '.url'}`);
+    const assetPath = newAssetPath(folder, stem, extname(item.asset_path || '') || '.url');
     if (item.asset_path && await exists(item.asset_path)) await rename(item.asset_path, assetPath);
     else throw new Error('Original asset is missing');
     if (await exists(oldText)) await rename(oldText, join(folder, `${stem}.txt`));
@@ -1355,8 +1652,8 @@ export class Library {
     item.review_reason = '';
     item.asset_path = assetPath;
     delete item.metadata_path;
-    await writeFile(join(folder, `${stem}.json`), json(item));
-    await writeFile(join(folder, `${stem}.summary.md`), renderNote(item));
+    await writeJsonFile(join(folder, `${stem}.json`), item);
+    await writeTextFile(join(folder, `${stem}.summary.md`), renderNote(item));
     await rm(oldMeta);
     if (await exists(oldSummary)) await rm(oldSummary);
     if (oldLegacyNote !== item.asset_path && await exists(oldLegacyNote)) await rm(oldLegacyNote);

@@ -1,180 +1,11 @@
 import { getDocument, GlobalWorkerOptions } from '/vendor/pdf.mjs';
 import { markdownToHtml as renderMarkdownHtml } from '/markdown.js';
+import { api } from '/api/client.js';
+import { activeFilterCount as countActiveFilters, filterItems, isRecent, scopeItems } from '/library/filtering.js';
+import { basisNames, kindNames, readingNames, relationNames, state } from '/state/app-state.js';
+import { elements, escapeHtml, formatBytes, inboxType, typeClass } from '/ui/dom.js';
 
 GlobalWorkerOptions.workerSrc = '/vendor/pdf.worker.mjs';
-
-const state = {
-  items: [],
-  inboxFiles: [],
-  temporaryNotes: [],
-  inboxAvailable: null,
-  backendCompatible: null,
-  tree: null,
-  scope: 'all',
-  category: '',
-  tag: '',
-  query: '',
-  searchMatches: new Map(),
-  searchRequest: 0,
-  filters: {
-    folder: '', kinds: [], tags: [], tagMode: 'and', status: '', readingStatuses: [], favorite: 'any',
-    scoreMin: 0, publishedFrom: '', publishedTo: '', receivedFrom: '', receivedTo: '', sort: 'received_desc',
-  },
-  savedViews: [],
-  relations: [],
-  restructureHistory: [],
-  restructureSelecting: false,
-  selectedStructureFolders: new Set(),
-  structureBusy: false,
-  creatingFolderParent: null,
-  libraryCreateMenuOpen: false,
-  importingUrls: false,
-  moveEntity: null,
-  graphMode: true,
-  graphFocusId: 'root',
-  graphViewport: { x: 0, y: 0, scale: 1 },
-  graphDrag: null,
-  graphMoved: false,
-  navigationHistory: [],
-  navigationIndex: -1,
-  restoringNavigation: false,
-  selectedId: null,
-  tab: 'asset',
-  renderToken: 0,
-  collapsedFolders: new Set(),
-  folderCollapseInitialized: false,
-  sidebarCollapsed: false,
-  readingMode: false,
-  pinning: false,
-  notebookPinning: false,
-  pendingNotebookAnchor: null,
-  pendingNoteCreate: null,
-  boundNotebookNotes: [],
-  activeNotebook: null,
-  notebookContent: '',
-  notebookPreview: false,
-  notebookSaveTimer: null,
-  notebookReaderPlaceholder: null,
-  readingPositionTimer: null,
-  restoringReadingPosition: false,
-  notes: [],
-  notesItemId: null,
-  noteSaveTimers: new Map(),
-  bookmarks: [],
-  bookmarksOpen: false,
-  bookmarkNaming: false,
-  pendingBookmarkAnchor: null,
-  updatePdfPage: null,
-  uploadingInbox: false,
-  processingInbox: false,
-  inboxProgress: '',
-  editingItemId: null,
-  busyAction: false,
-};
-
-const elements = {
-  workspace: document.querySelector('#workspace'),
-  sidebarToggle: document.querySelector('#sidebarToggle'),
-  inboxCount: document.querySelector('#inboxCount'),
-  temporaryNoteCount: document.querySelector('#temporaryNoteCount'),
-  inboxDropzone: document.querySelector('#inboxDropzone'),
-  inboxFileInput: document.querySelector('#inboxFileInput'),
-  inboxChooseButton: document.querySelector('#inboxChooseButton'),
-  processInboxButton: document.querySelector('#processInboxButton'),
-  processInboxLabel: document.querySelector('#processInboxLabel'),
-  inboxStatus: document.querySelector('#inboxStatus'),
-  allCount: document.querySelector('#allCount'),
-  recentCount: document.querySelector('#recentCount'),
-  reviewCount: document.querySelector('#reviewCount'),
-  favoriteCount: document.querySelector('#favoriteCount'),
-  unreadCount: document.querySelector('#unreadCount'),
-  savedViewCount: document.querySelector('#savedViewCount'),
-  savedViewList: document.querySelector('#savedViewList'),
-  libraryCount: document.querySelector('#libraryCount'),
-  structureButton: document.querySelector('#structureButton'),
-  structureCancelButton: document.querySelector('#structureCancelButton'),
-  rollbackButton: document.querySelector('#rollbackButton'),
-  rollbackPanel: document.querySelector('#rollbackPanel'),
-  tree: document.querySelector('#libraryTree'),
-  collectionPath: document.querySelector('#collectionPath'),
-  collectionTitle: document.querySelector('#collectionTitle'),
-  search: document.querySelector('#searchInput'),
-  contentColumn: document.querySelector('.content-column'),
-  reader: document.querySelector('.reader'),
-  backButton: document.querySelector('#backButton'),
-  forwardButton: document.querySelector('#forwardButton'),
-  filterButton: document.querySelector('#filterButton'),
-  filterCount: document.querySelector('#filterCount'),
-  filterPanel: document.querySelector('#filterPanel'),
-  folderFilter: document.querySelector('#folderFilter'),
-  folderFilterButton: document.querySelector('#folderFilterButton'),
-  folderFilterSelection: document.querySelector('#folderFilterSelection'),
-  folderFilterPopover: document.querySelector('#folderFilterPopover'),
-  urlImportDialog: document.querySelector('#urlImportDialog'),
-  urlImportInput: document.querySelector('#urlImportInput'),
-  urlImportFeedback: document.querySelector('#urlImportFeedback'),
-  urlImportSubmit: document.querySelector('#urlImportSubmit'),
-  structureHistory: document.querySelector('#structureHistory'),
-  movePopover: document.querySelector('#movePopover'),
-  graphButton: document.querySelector('#graphButton'),
-  graphPanel: document.querySelector('#graphPanel'),
-  graphCanvas: document.querySelector('#graphCanvas'),
-  graphZoom: document.querySelector('#graphZoom'),
-  resultCount: document.querySelector('#resultCount'),
-  list: document.querySelector('#itemList'),
-  readerKind: document.querySelector('#readerKind'),
-  readerTitle: document.querySelector('#readerTitle'),
-  readerSubtitle: document.querySelector('#readerSubtitle'),
-  viewer: document.querySelector('#viewer'),
-  openOriginal: document.querySelector('#openOriginal'),
-  readingToggle: document.querySelector('#readingToggle'),
-  inspectorEmpty: document.querySelector('#inspectorEmpty'),
-  inspector: document.querySelector('#inspectorContent'),
-  notesPanel: document.querySelector('#notesPanel'),
-  newNoteButton: document.querySelector('#newNoteButton'),
-  newNotebookButton: document.querySelector('#newNotebookButton'),
-  bookmarkButton: document.querySelector('#bookmarkButton'),
-  bookmarkCount: document.querySelector('#bookmarkCount'),
-  bookmarkPopover: document.querySelector('#bookmarkPopover'),
-  pinHint: document.querySelector('#pinHint'),
-  notesScroll: document.querySelector('#notesScroll'),
-  notesTrack: document.querySelector('#notesTrack'),
-  noteLines: document.querySelector('#noteLines'),
-  anchorMarkers: document.querySelector('#anchorMarkers'),
-  notebookWorkspace: document.querySelector('#notebookWorkspace'),
-  notebookLeft: document.querySelector('#notebookLeft'),
-  notebookRight: document.querySelector('#notebookRight'),
-  noteNameDialog: document.querySelector('#noteNameDialog'),
-  noteNameForm: document.querySelector('#noteNameForm'),
-  noteNameInput: document.querySelector('#noteNameInput'),
-  noteNameHelp: document.querySelector('#noteNameHelp'),
-  statusDot: document.querySelector('#statusDot'),
-  connectionStatus: document.querySelector('#connectionStatus'),
-  toast: document.querySelector('#toast'),
-};
-
-const kindNames = {
-  pdf: 'PDF', image: '图片', video: '视频', article: '网页', markdown: 'Markdown', text: '文本', code: '代码',
-  document: '文档', presentation: '演示文稿', spreadsheet: '表格', ebook: '电子书', audio: '音频', archive: '压缩包', unknown: '文件',
-  note: '笔记',
-};
-const basisNames = {
-  full_text: '提取的正文', title_description: '标题与简介', title_only: '仅标题',
-  image: '图片内容', audio_metadata: '音频元数据', archive_listing: '压缩包文件清单', manual_correction: '人工校正文本', unavailable: '未提取',
-};
-const readingNames = { unread: '未读', reading: '阅读中', read: '已读' };
-const relationNames = { related: '相关', cites: '引用', supports: '支持', contradicts: '反驳', follow_up: '后续研究' };
-
-function escapeHtml(value = '') {
-  return String(value).replace(/[&<>'"]/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' })[character]);
-}
-
-function api(path, options) {
-  return fetch(path, options).then(async response => {
-    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || `请求失败：${response.status}`);
-    return response.json();
-  });
-}
 
 function navigationSnapshot() {
   return {
@@ -238,69 +69,16 @@ function goForward() {
   restoreNavigation(state.navigationHistory[state.navigationIndex]);
 }
 
-function isRecent(item) {
-  if (!item.received_at) return false;
-  return Date.now() - new Date(`${item.received_at}T00:00:00`).getTime() <= 30 * 24 * 60 * 60 * 1000;
-}
-
-function formatBytes(bytes) {
-  if (!Number.isFinite(bytes) || bytes < 1) return '0 B';
-  const units = ['B', 'KB', 'MB', 'GB'];
-  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-  const value = bytes / 1024 ** index;
-  return `${value >= 10 || index === 0 ? Math.round(value) : value.toFixed(1)} ${units[index]}`;
-}
-
-function inboxType(file) {
-  return String(file.extension || '').replace('.', '').toUpperCase() || 'FILE';
-}
-
 function scopedItems() {
-  return state.items.filter(item => {
-    if (state.scope === 'review' && item.status !== 'review') return false;
-    if (state.scope === 'recent' && !isRecent(item)) return false;
-    if (state.scope === 'favorites' && !item.favorite) return false;
-    if (state.scope === 'unread' && item.reading_status !== 'unread') return false;
-    if (state.scope === 'category' && item.status !== 'ready') return false;
-    if (state.scope === 'category' && item.category !== state.category && !item.category?.startsWith(`${state.category}/`)) return false;
-    return true;
-  });
+  return scopeItems(state);
 }
 
 function filteredItems() {
-  const query = state.query.trim();
-  const filters = state.filters;
-  const results = scopedItems().filter(item => {
-    if (filters.folder && item.category !== filters.folder && !item.category?.startsWith(`${filters.folder}/`)) return false;
-    if (query && !state.searchMatches.has(item.id)) return false;
-    if (filters.kinds.length && !filters.kinds.includes(item.kind)) return false;
-    if (filters.status && item.status !== filters.status) return false;
-    if (filters.readingStatuses.length && !filters.readingStatuses.includes(item.reading_status)) return false;
-    if (filters.favorite === 'yes' && !item.favorite) return false;
-    if (filters.favorite === 'no' && item.favorite) return false;
-    if (filters.scoreMin && (item.quality_score || 0) < filters.scoreMin) return false;
-    if (filters.tags.length) {
-      const matches = filters.tags.map(tag => item.tags?.includes(tag));
-      if (filters.tagMode === 'and' ? !matches.every(Boolean) : !matches.some(Boolean)) return false;
-    }
-    if (filters.publishedFrom && (!item.published_at || item.published_at < filters.publishedFrom)) return false;
-    if (filters.publishedTo && (!item.published_at || item.published_at > filters.publishedTo)) return false;
-    if (filters.receivedFrom && (!item.received_at || item.received_at < filters.receivedFrom)) return false;
-    if (filters.receivedTo && (!item.received_at || item.received_at > filters.receivedTo)) return false;
-    return true;
-  });
-  return results.sort((a, b) => {
-    if (query) return (state.searchMatches.get(b.id)?.score || 0) - (state.searchMatches.get(a.id)?.score || 0);
-    if (filters.sort === 'published_desc') return String(b.published_at || '').localeCompare(String(a.published_at || ''));
-    if (filters.sort === 'score_desc') return (b.quality_score || 0) - (a.quality_score || 0);
-    if (filters.sort === 'title_asc') return a.title.localeCompare(b.title, 'zh-CN');
-    return String(b.received_at || '').localeCompare(String(a.received_at || ''));
-  });
+  return filterItems(state);
 }
 
 function activeFilterCount() {
-  const f = state.filters;
-  return Number(Boolean(f.folder)) + f.kinds.length + f.tags.length + f.readingStatuses.length + Number(Boolean(f.status)) + Number(f.favorite !== 'any') + Number(f.scoreMin > 0) + Number(Boolean(f.publishedFrom)) + Number(Boolean(f.publishedTo)) + Number(Boolean(f.receivedFrom)) + Number(Boolean(f.receivedTo)) + Number(f.sort !== 'received_desc');
+  return countActiveFilters(state.filters);
 }
 
 function folderCreatorHtml(parent, depth) {
@@ -564,10 +342,6 @@ function applySavedView(view) {
   setGraphMode(false);
   runSearch().then(pushNavigation);
   renderNavigation();
-}
-
-function typeClass(item) {
-  return ['pdf', 'video', 'image'].includes(item.kind) ? item.kind : '';
 }
 
 function findFolderNode(path, nodes = state.tree?.children || []) {
@@ -1790,7 +1564,10 @@ async function persistActiveNotebook() {
   if (status) status.textContent = '保存中…';
   const title = elements.notebookWorkspace.querySelector('[data-notebook-title]')?.value.trim() || '未命名笔记';
   const content = elements.notebookWorkspace.querySelector('[data-notebook-content]')?.value ?? state.notebookContent;
-  const saved = await api(`/api/notebook/notes/${state.activeNotebook.id}`, { method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title, content }) });
+  const saved = await api(`/api/notebook/notes/${state.activeNotebook.id}`, {
+    method: 'PATCH', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ title, content, ...(state.activeNotebook.vault_revision ? { expected_revision: state.activeNotebook.vault_revision } : {}) }),
+  });
   state.activeNotebook = { ...state.activeNotebook, ...saved, title };
   state.notebookContent = content;
   const item = state.items.find(value => value.id === state.activeNotebook.id);

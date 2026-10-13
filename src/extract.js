@@ -4,6 +4,7 @@ import { isIP } from 'node:net';
 import { basename, extname, posix } from 'node:path';
 import { load } from 'cheerio';
 import { parseBuffer as parseAudioBuffer } from 'music-metadata';
+import { Agent } from 'undici';
 import { fromBufferPromise } from 'yauzl';
 
 const IMAGE_TYPES = new Map([['.jpg', 'image/jpeg'], ['.jpeg', 'image/jpeg'], ['.png', 'image/png'], ['.webp', 'image/webp'], ['.gif', 'image/gif']]);
@@ -33,45 +34,67 @@ function publicAddress(address) {
     (a === 100 && b >= 64 && b <= 127));
 }
 
-export async function validateRemoteUrl(raw) {
+export async function resolveRemoteUrl(raw, lookupImpl = lookup) {
   const url = new URL(raw);
   if (!['http:', 'https:'].includes(url.protocol)) throw new Error('Only HTTP(S) URLs are supported');
   if (url.username || url.password) throw new Error('URLs with credentials are not supported');
-  const addresses = await lookup(url.hostname, { all: true });
+  const addresses = await lookupImpl(url.hostname, { all: true });
   if (!addresses.length || addresses.some(({ address }) => !publicAddress(address))) {
     throw new Error('Private or local network URLs are not supported');
   }
-  return url;
+  return { url, addresses };
 }
 
-export async function fetchPage(raw, fetchImpl = fetch) {
-  let url = await validateRemoteUrl(raw);
+export async function validateRemoteUrl(raw, lookupImpl = lookup) {
+  return (await resolveRemoteUrl(raw, lookupImpl)).url;
+}
+
+export function createPinnedLookup(addresses) {
+  const records = addresses.map(({ address, family }) => ({ address, family: Number(family) }));
+  return (_hostname, options, callback) => {
+    const family = Number(options?.family || 0);
+    const matches = family ? records.filter(record => record.family === family) : records;
+    if (!matches.length) return callback(new Error('No validated address matches the requested network family'));
+    if (options?.all) return callback(null, matches);
+    callback(null, matches[0].address, matches[0].family);
+  };
+}
+
+export async function fetchPage(raw, fetchImpl = fetch, lookupImpl = lookup) {
+  let target = await resolveRemoteUrl(raw, lookupImpl);
   for (let redirect = 0; redirect < 5; redirect++) {
-    const response = await fetchImpl(url, {
-      redirect: 'manual',
-      signal: AbortSignal.timeout(20000),
-      headers: { 'user-agent': 'PersonalInfoBox/0.1 (+local knowledge inbox)', accept: 'text/html,application/pdf;q=0.9' },
-    });
-    if ([301, 302, 303, 307, 308].includes(response.status)) {
-      const location = response.headers.get('location');
-      if (!location) throw new Error('Redirect has no destination');
-      url = await validateRemoteUrl(new URL(location, url).toString());
-      continue;
+    const dispatcher = new Agent({ connect: { lookup: createPinnedLookup(target.addresses) } });
+    try {
+      const response = await fetchImpl(target.url, {
+        dispatcher,
+        redirect: 'manual',
+        signal: AbortSignal.timeout(20000),
+        headers: { 'user-agent': 'PersonalInfoBox/0.1 (+local knowledge inbox)', accept: 'text/html,application/pdf;q=0.9' },
+      });
+      if ([301, 302, 303, 307, 308].includes(response.status)) {
+        const location = response.headers.get('location');
+        if (!location) throw new Error('Redirect has no destination');
+        await response.body?.cancel();
+        target = await resolveRemoteUrl(new URL(location, target.url).toString(), lookupImpl);
+        continue;
+      }
+      if (!response.ok) throw new Error(`Source returned HTTP ${response.status}`);
+      const size = Number(response.headers.get('content-length') || 0);
+      if (size > MAX_WEB_BYTES) throw new Error('Remote content is too large');
+      const reader = response.body.getReader();
+      const chunks = [];
+      let total = 0;
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (total > MAX_WEB_BYTES) { await reader.cancel(); throw new Error('Remote content is too large'); }
+        chunks.push(value);
+      }
+      return { url: target.url.toString(), type: response.headers.get('content-type') || '', body: Buffer.concat(chunks) };
+    } finally {
+      await dispatcher.close();
     }
-    if (!response.ok) throw new Error(`Source returned HTTP ${response.status}`);
-    const size = Number(response.headers.get('content-length') || 0);
-    if (size > MAX_WEB_BYTES) throw new Error('Remote content is too large');
-    const reader = response.body.getReader();
-    const chunks = [];
-    let total = 0;
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      total += value.byteLength;
-      if (total > MAX_WEB_BYTES) { await reader.cancel(); throw new Error('Remote content is too large'); }
-      chunks.push(value);
-    }
-    return { url: url.toString(), type: response.headers.get('content-type') || '', body: Buffer.concat(chunks) };
   }
   throw new Error('Too many redirects');
 }

@@ -1,27 +1,11 @@
-import { readdir, writeFile } from 'node:fs/promises';
-import { extname, join, resolve } from 'node:path';
+import { writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Library } from './library.js';
 import { getGenerationConfiguration } from './models.js';
+import { processInbox } from './services/inbox-service.js';
 
-const SUPPORTED = new Set(['.pdf', '.jpg', '.jpeg', '.png', '.webp', '.gif', '.url', '.webloc']);
-
-export async function processInbox(library, onResult = () => {}) {
-  await library.init({ watchInbox: false });
-  const entries = await readdir(library.inbox, { withFileTypes: true });
-  const files = entries.filter(entry => entry.isFile() && SUPPORTED.has(extname(entry.name).toLowerCase()));
-  const skipped = entries.filter(entry => entry.isFile() && !entry.name.startsWith('.') && !entry.name.endsWith('.partial') && !SUPPORTED.has(extname(entry.name).toLowerCase())).map(entry => entry.name);
-  const results = [];
-  for (const entry of files) {
-    const job = await library.enqueue(join(library.inbox, entry.name));
-    if (!job) continue;
-    await library.chain;
-    const finished = await library.getJob(job.id);
-    results.push(finished);
-    onResult(finished);
-  }
-  return { results, skipped };
-}
+export { processInbox } from './services/inbox-service.js';
 
 async function main() {
   try { process.loadEnvFile('.env'); } catch (error) { if (error.code !== 'ENOENT') throw error; }

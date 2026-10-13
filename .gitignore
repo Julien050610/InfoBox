@@ -1,7 +1,9 @@
 node_modules/
 .npm-cache/
 .env
-inbox/
-library/
-needs-review/
-data/
+/inbox/
+/library/
+/needs-review/
+/data/
+/trash/
+/vault/

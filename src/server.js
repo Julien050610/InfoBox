@@ -5,11 +5,19 @@ import { rename, stat, writeFile } from 'node:fs/promises';
 import { basename, dirname, extname, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Library, SUPPORTED_INBOX_EXTENSIONS } from './library.js';
+import { errorResponse, ForbiddenError } from './errors.js';
+import { logger } from './logger.js';
 import { markdownToHtml } from '../web/markdown.js';
 
 try { process.loadEnvFile('.env'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
 
 const MAX_UPLOAD = 32 * 1024 * 1024;
+const SECURITY_HEADERS = {
+  'x-content-type-options': 'nosniff',
+  'referrer-policy': 'no-referrer',
+  'cross-origin-resource-policy': 'same-origin',
+  'x-frame-options': 'SAMEORIGIN',
+};
 const WEB_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'web');
 const PDFJS_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'node_modules', 'pdfjs-dist', 'build');
 const MIME_TYPES = new Map([
@@ -26,12 +34,12 @@ const MIME_TYPES = new Map([
 ]);
 
 function send(response, status, body) {
-  response.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
+  response.writeHead(status, { ...SECURITY_HEADERS, 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' });
   response.end(JSON.stringify(body));
 }
 
 function sendBuffer(response, status, bytes, headers = {}) {
-  response.writeHead(status, { 'content-length': bytes.length, 'cache-control': 'no-store', ...headers });
+  response.writeHead(status, { ...SECURITY_HEADERS, 'content-length': bytes.length, 'cache-control': 'no-store', ...headers });
   response.end(bytes);
 }
 
@@ -67,17 +75,35 @@ function within(path, roots) {
   return roots.some(root => target === resolve(root).toLowerCase() || target.startsWith(`${resolve(root).toLowerCase()}${sep}`));
 }
 
+function validateRequestSource(request) {
+  const host = String(request.headers.host || '').toLowerCase();
+  const match = host.match(/^(localhost|127\.0\.0\.1|\[::1\])(?::\d{1,5})?$/);
+  if (!match) throw new ForbiddenError('Only local InfoBox requests are allowed', 'FORBIDDEN_HOST');
+  if (['GET', 'HEAD', 'OPTIONS'].includes(request.method)) return;
+  const origin = request.headers.origin;
+  if (origin) {
+    let source;
+    try { source = new URL(origin); }
+    catch { throw new ForbiddenError('Invalid request origin', 'FORBIDDEN_ORIGIN'); }
+    if (!['http:', 'https:'].includes(source.protocol) || source.host.toLowerCase() !== host) {
+      throw new ForbiddenError('Cross-origin writes are not allowed', 'FORBIDDEN_ORIGIN');
+    }
+  }
+  const fetchSite = request.headers['sec-fetch-site'];
+  if (fetchSite && !['same-origin', 'none'].includes(fetchSite)) throw new ForbiddenError('Cross-site writes are not allowed', 'FORBIDDEN_ORIGIN');
+}
+
 async function sendFile(request, response, path, options = {}) {
   const info = await stat(path).catch(() => null);
   if (!info?.isFile()) return send(response, 404, { error: 'File not found' });
   const type = options.type || MIME_TYPES.get(extname(path).toLowerCase()) || 'application/octet-stream';
-  const headers = { 'content-type': type, 'accept-ranges': 'bytes', 'cache-control': options.cache || 'private, max-age=60' };
+  const headers = { ...SECURITY_HEADERS, 'content-type': type, 'accept-ranges': 'bytes', 'cache-control': options.cache || 'private, max-age=60' };
   const range = request.headers.range?.match(/^bytes=(\d*)-(\d*)$/);
   if (range) {
     const start = range[1] ? Number(range[1]) : 0;
     const end = range[2] ? Math.min(Number(range[2]), info.size - 1) : info.size - 1;
     if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || start > end || start >= info.size) {
-      response.writeHead(416, { 'content-range': `bytes */${info.size}` });
+      response.writeHead(416, { ...SECURITY_HEADERS, 'content-range': `bytes */${info.size}` });
       return response.end();
     }
     response.writeHead(206, { ...headers, 'content-length': end - start + 1, 'content-range': `bytes ${start}-${end}/${info.size}` });
@@ -91,7 +117,8 @@ export function createApi(library) {
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://localhost');
-    if (request.method === 'GET' && url.pathname === '/health') return send(response, 200, { status: 'ok', api_version: 13 });
+      validateRequestSource(request);
+      if (request.method === 'GET' && url.pathname === '/health') return send(response, 200, { status: 'ok', api_version: 15 });
       if (request.method === 'GET' && url.pathname === '/api/library/tree') return send(response, 200, await library.tree());
       if (request.method === 'POST' && url.pathname === '/api/library/folders') {
         const payload = JSON.parse((await bodyBuffer(request)).toString('utf8'));
@@ -100,6 +127,21 @@ export function createApi(library) {
       if (request.method === 'PATCH' && url.pathname === '/api/library/folders') {
         const payload = JSON.parse((await bodyBuffer(request)).toString('utf8'));
         return send(response, 200, await library.moveFolder(payload));
+      }
+      if (request.method === 'DELETE' && url.pathname === '/api/library/folders') {
+        const folder = await library.deleteFolder(url.searchParams.get('path'));
+        return send(response, folder ? 200 : 404, folder || { error: 'Folder not found' });
+      }
+      if (request.method === 'GET' && url.pathname === '/api/trash') return send(response, 200, await library.trashEntries());
+      const trashRestoreMatch = url.pathname.match(/^\/api\/trash\/([0-9a-f-]{36})\/restore$/);
+      if (request.method === 'POST' && trashRestoreMatch) {
+        const entry = await library.restoreTrashEntry(trashRestoreMatch[1]);
+        return send(response, entry ? 200 : 404, entry || { error: 'Trash entry not found' });
+      }
+      const trashMatch = url.pathname.match(/^\/api\/trash\/([0-9a-f-]{36})$/);
+      if (request.method === 'DELETE' && trashMatch) {
+        const entry = await library.permanentlyDeleteTrashEntry(trashMatch[1]);
+        return send(response, entry ? 200 : 404, entry || { error: 'Trash entry not found' });
       }
       if (request.method === 'GET' && url.pathname === '/api/restructure/history') return send(response, 200, await library.restructureHistory());
       if (request.method === 'POST' && url.pathname === '/api/restructure/preview') {
@@ -321,7 +363,10 @@ export function createApi(library) {
         if (url.searchParams.get('defer') === '1') return send(response, 202, { status: 'pending', name: basename(path) });
         return send(response, 202, await library.enqueue(path, name));
       }
-      const staticFiles = new Map([['/', 'index.html'], ['/index.html', 'index.html'], ['/styles.css', 'styles.css'], ['/app.js', 'app.js'], ['/markdown.js', 'markdown.js'], ['/favicon.svg', 'favicon.svg']]);
+      const staticFiles = new Map([
+        ['/', 'index.html'], ['/index.html', 'index.html'], ['/styles.css', 'styles.css'], ['/app.js', 'app.js'], ['/markdown.js', 'markdown.js'], ['/favicon.svg', 'favicon.svg'],
+        ['/api/client.js', 'api/client.js'], ['/state/app-state.js', 'state/app-state.js'], ['/ui/dom.js', 'ui/dom.js'], ['/library/filtering.js', 'library/filtering.js'],
+      ]);
       const vendorFiles = new Map([['/vendor/pdf.mjs', 'pdf.mjs'], ['/vendor/pdf.worker.mjs', 'pdf.worker.mjs']]);
       if (request.method === 'GET' && vendorFiles.has(url.pathname)) {
         return sendFile(request, response, join(PDFJS_ROOT, vendorFiles.get(url.pathname)), { type: 'text/javascript; charset=utf-8', cache: 'public, max-age=86400' });
@@ -331,7 +376,9 @@ export function createApi(library) {
       }
       send(response, 404, { error: 'Route not found' });
     } catch (error) {
-      send(response, error instanceof SyntaxError || error instanceof TypeError || /^Only |^Supported |^File |^Upload |^quality_score|^tags |^published_at|^corrected_text|^favorite |^reading_|^last_opened|^Add |^Unsupported |^Item update|^Move or |^Correction |^Folder |^Parent folder|^Invalid note|^Invalid bookmark|^Bookmark name|^Invalid inbox|^Invalid notebook|^Notebook |^Empty notes|^Bound item|^Cannot delete|^Note content|^Saved view|^Relation |^Related item|^Category |^Restructure |^Select at least|^Selected folders|^Target folder|^This move|^This structure/.test(error.message) ? 400 : 500, { error: error.message });
+      const failure = errorResponse(error);
+      if (failure.status >= 500) logger.error('http_request_failed', { errorCode: failure.body.code, method: request.method, route: request.url?.split('?')[0] });
+      send(response, failure.status, failure.body);
     }
   });
 }
