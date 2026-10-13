@@ -10,6 +10,8 @@ v0.1.2 会在抓取时固定已经校验过的公网 DNS 地址，并在每次�
 
 当前开发版开始引入 Obsidian 兼容的 Markdown Vault。直接在具体文件夹新建、且没有绑定原资料的普通笔记，以 `vault/notes/<stable-id>.md` 作为唯一真源；图片位于 `vault/attachments/<stable-id>/` 并使用相对路径。IB 保存前会检查文件修订值，检测到 Obsidian 等外部程序已修改时返回冲突并要求重新载入，不会静默覆盖。临时笔记、绑定笔记和已有 JSON 笔记暂时保持兼容读取。完整字段与迁移规则见 [`docs/MARKDOWN_VAULT.md`](docs/MARKDOWN_VAULT.md)。
 
+笔记工作区使用本地打包的 CodeMirror 6 编辑器，支持 Markdown/GFM、YAML frontmatter、撤销重做、查找替换、标题大纲和常用格式快捷键。工具栏可以插入标题、粗体、斜体、链接、任务列表、表格、代码块和数学公式；右侧预览支持 GFM 表格、任务列表及 KaTeX 公式。编辑器和公式资源随项目本地提供，不需要连接 CDN。修改编辑器源码后可运行 `npm run build:editor` 重新生成浏览器包。
+
 ## 启动
 
 需要 Node.js 24 或更新版本。

@@ -1,6 +1,8 @@
 import { getDocument, GlobalWorkerOptions } from '/vendor/pdf.mjs';
 import { markdownToHtml as renderMarkdownHtml } from '/markdown.js';
+import { createMarkdownEditor } from '/vendor/codemirror-editor.js';
 import { api } from '/api/client.js';
+import { renderMathIn } from '/editor/math.js';
 import { activeFilterCount as countActiveFilters, filterItems, isRecent, scopeItems } from '/library/filtering.js';
 import { basisNames, kindNames, readingNames, relationNames, state } from '/state/app-state.js';
 import { elements, escapeHtml, formatBytes, inboxType, typeClass } from '/ui/dom.js';
@@ -1470,11 +1472,55 @@ function notebookEditorHtml(note, content, { close = true } = {}) {
   return `<header class="notebook-pane-head"><div><strong>${temporary ? '临时笔记' : note.bound_item_id ? '绑定笔记' : '知识笔记'}</strong><small>${temporary ? '自动保存于本地草稿区' : escapeHtml(note.category || '')}</small></div><div class="notebook-head-actions">
     ${temporary ? '<button type="button" data-notebook-submit>送入收件箱</button>' : `<a href="/api/notebook/notes/${note.id}/export/markdown">导出 MD 包</a><a href="/api/notebook/notes/${note.id}/export/pdf" target="_blank">导出 PDF</a>`}
     ${close ? '<button type="button" data-notebook-close>关闭</button>' : ''}
-  </div></header><div class="notebook-editor-wrap"><input class="notebook-title-input" data-notebook-title maxlength="80" value="${escapeHtml(note.title)}" aria-label="笔记标题"><textarea class="notebook-editor" data-notebook-content spellcheck="true" placeholder="使用 Markdown 写下内容，可直接粘贴图片…">${escapeHtml(content)}</textarea><span class="notebook-save-status" data-notebook-save-status>已保存 · 可粘贴图片</span></div>`;
+  </div></header><div class="notebook-editor-wrap">
+    <input class="notebook-title-input" data-notebook-title maxlength="80" value="${escapeHtml(note.title)}" aria-label="笔记标题">
+    <div class="notebook-toolbar" role="toolbar" aria-label="Markdown 格式工具">
+      <span class="notebook-tool-group"><button type="button" data-editor-command="undo" title="撤销 Ctrl+Z">↶</button><button type="button" data-editor-command="redo" title="重做 Ctrl+Y">↷</button><button type="button" data-editor-command="search" title="查找与替换 Ctrl+F">查找</button></span>
+      <span class="notebook-tool-group"><button type="button" data-editor-command="heading-2" title="二级标题 Ctrl+Alt+2">H2</button><button type="button" data-editor-command="bold" title="粗体 Ctrl+B"><strong>B</strong></button><button type="button" data-editor-command="italic" title="斜体 Ctrl+I"><em>I</em></button><button type="button" data-editor-command="link" title="链接 Ctrl+Shift+K">链接</button></span>
+      <span class="notebook-tool-group"><button type="button" data-editor-command="task">任务</button><button type="button" data-editor-command="table">表格</button><button type="button" data-editor-command="code-block">代码</button><button type="button" data-editor-command="math">公式</button></span>
+      <button class="notebook-outline-toggle" type="button" data-notebook-outline-toggle aria-expanded="false">大纲</button>
+    </div>
+    <div class="notebook-editor-stage"><div class="notebook-editor" data-notebook-editor></div><aside class="notebook-outline" data-notebook-outline hidden><header>文档大纲</header><nav data-notebook-outline-list></nav></aside></div>
+    <span class="notebook-save-status" data-notebook-save-status>已保存 · Markdown 真源</span>
+  </div>`;
 }
 
 function notebookPreviewHtml(note, content, { close = false } = {}) {
   return `<header class="notebook-pane-head"><div><strong>Markdown 预览</strong><small>图片随笔记保存在本地</small></div><div class="notebook-head-actions">${close ? '<button type="button" data-notebook-close>关闭</button>' : ''}</div></header><div class="notebook-preview"><article>${renderMarkdownHtml(content, { assetUrl: name => `/api/notebook/notes/${note.id}/assets/${encodeURIComponent(name)}` }) || '<p>开始书写后，这里会实时显示排版结果。</p>'}</article></div>`;
+}
+
+function renderNotebookOutline(outline = []) {
+  const list = elements.notebookWorkspace.querySelector('[data-notebook-outline-list]');
+  if (!list) return;
+  list.innerHTML = outline.length
+    ? outline.map(item => `<button type="button" data-outline-offset="${item.from}" style="--outline-level:${item.level}">${escapeHtml(item.text)}</button>`).join('')
+    : '<p>添加标题后会在这里形成大纲。</p>';
+}
+
+function renderNotebookPreview() {
+  if (!state.activeNotebook) return;
+  const html = renderMarkdownHtml(state.notebookContent, { assetUrl: name => `/api/notebook/notes/${state.activeNotebook.id}/assets/${encodeURIComponent(name)}` }) || '<p>开始书写后，这里会实时显示排版结果。</p>';
+  for (const preview of elements.notebookWorkspace.querySelectorAll('.notebook-preview article')) {
+    preview.innerHTML = html;
+    renderMathIn(preview);
+  }
+}
+
+function mountNotebookEditor() {
+  state.notebookEditor?.destroy();
+  const parent = elements.notebookWorkspace.querySelector('[data-notebook-editor]');
+  if (!parent) { state.notebookEditor = null; return; }
+  state.notebookEditor = createMarkdownEditor({
+    parent,
+    value: state.notebookContent,
+    onChange(content) {
+      state.notebookContent = content;
+      renderNotebookPreview();
+      scheduleNotebookSave();
+    },
+    onOutlineChange: renderNotebookOutline,
+    onPasteImage: uploadNotebookImage,
+  });
 }
 
 async function renderNotebookWorkspace() {
@@ -1496,6 +1542,8 @@ async function renderNotebookWorkspace() {
     elements.notebookLeft.innerHTML = notebookEditorHtml(active, state.notebookContent);
     elements.notebookRight.innerHTML = notebookPreviewHtml(active, state.notebookContent);
   }
+  mountNotebookEditor();
+  renderNotebookPreview();
 }
 
 async function toggleNotebookSourcePreview() {
@@ -1509,6 +1557,7 @@ async function toggleNotebookSourcePreview() {
   if (preview) {
     preview.hidden = !state.notebookPreview;
     preview.querySelector('article').innerHTML = renderMarkdownHtml(state.notebookContent, { assetUrl: name => `/api/notebook/notes/${state.activeNotebook.id}/assets/${encodeURIComponent(name)}` }) || '<p>开始书写后，这里会显示排版结果。</p>';
+    renderMathIn(preview);
   }
   if (button) button.textContent = state.notebookPreview ? '返回原资料' : '预览笔记';
   if (!state.notebookPreview) await restoreReadingPosition(selectedItem());
@@ -1535,18 +1584,23 @@ async function openNotebook(id) {
     state.notebookContent = record.content || '';
     state.notebookPreview = false;
     await renderNotebookWorkspace();
-    requestAnimationFrame(() => elements.notebookWorkspace.querySelector('[data-notebook-content]')?.focus());
+    requestAnimationFrame(() => state.notebookEditor?.focus());
   } catch (error) { showToast(error.message); }
 }
 
 async function closeNotebook() {
   clearTimeout(state.notebookSaveTimer);
-  if (state.activeNotebook) await persistActiveNotebook().catch(error => showToast(error.message));
+  if (state.activeNotebook) {
+    try { await persistActiveNotebook(); }
+    catch (error) { showToast(error.message); return; }
+  }
   if (state.activeNotebook?.bound_item_id) await saveReadingPosition({ immediate: true }).catch(error => showToast(error.message));
   if (state.notebookReaderPlaceholder?.isConnected) state.notebookReaderPlaceholder.replaceWith(elements.reader);
   elements.reader.classList.remove('notebook-embedded-reader');
   await restoreReadingPosition(selectedItem());
   state.notebookReaderPlaceholder = null;
+  state.notebookEditor?.destroy();
+  state.notebookEditor = null;
   state.activeNotebook = null;
   state.notebookContent = '';
   state.notebookPreview = false;
@@ -1560,24 +1614,34 @@ async function closeNotebook() {
 
 async function persistActiveNotebook() {
   if (!state.activeNotebook) return;
-  const status = elements.notebookWorkspace.querySelector('[data-notebook-save-status]');
-  if (status) status.textContent = '保存中…';
-  const title = elements.notebookWorkspace.querySelector('[data-notebook-title]')?.value.trim() || '未命名笔记';
-  const content = elements.notebookWorkspace.querySelector('[data-notebook-content]')?.value ?? state.notebookContent;
-  const saved = await api(`/api/notebook/notes/${state.activeNotebook.id}`, {
-    method: 'PATCH', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ title, content, ...(state.activeNotebook.vault_revision ? { expected_revision: state.activeNotebook.vault_revision } : {}) }),
-  });
-  state.activeNotebook = { ...state.activeNotebook, ...saved, title };
-  state.notebookContent = content;
-  const item = state.items.find(value => value.id === state.activeNotebook.id);
-  if (item) Object.assign(item, state.activeNotebook);
-  const temporary = state.temporaryNotes.find(value => value.id === state.activeNotebook.id);
-  if (temporary) Object.assign(temporary, state.activeNotebook);
-  const currentStatus = elements.notebookWorkspace.querySelector('[data-notebook-save-status]');
-  if (currentStatus) currentStatus.textContent = '已保存 · 可粘贴图片';
-  const preview = elements.notebookWorkspace.querySelector('.notebook-preview article');
-  if (preview) preview.innerHTML = renderMarkdownHtml(content, { assetUrl: name => `/api/notebook/notes/${state.activeNotebook.id}/assets/${encodeURIComponent(name)}` }) || '<p>开始书写后，这里会实时显示排版结果。</p>';
+  const noteId = state.activeNotebook.id;
+  const save = async () => {
+    if (state.activeNotebook?.id !== noteId) return;
+    const status = elements.notebookWorkspace.querySelector('[data-notebook-save-status]');
+    if (status) status.textContent = '保存中…';
+    const title = elements.notebookWorkspace.querySelector('[data-notebook-title]')?.value.trim() || '未命名笔记';
+    const content = state.notebookEditor?.getValue() ?? state.notebookContent;
+    const saved = await api(`/api/notebook/notes/${noteId}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ title, content, ...(state.activeNotebook.vault_revision ? { expected_revision: state.activeNotebook.vault_revision } : {}) }),
+    });
+    if (state.activeNotebook?.id !== noteId) return saved;
+    state.activeNotebook = { ...state.activeNotebook, ...saved, title };
+    state.notebookContent = content;
+    const item = state.items.find(value => value.id === noteId);
+    if (item) Object.assign(item, state.activeNotebook);
+    const temporary = state.temporaryNotes.find(value => value.id === noteId);
+    if (temporary) Object.assign(temporary, state.activeNotebook);
+    const currentStatus = elements.notebookWorkspace.querySelector('[data-notebook-save-status]');
+    if (currentStatus) currentStatus.textContent = '已保存 · Markdown 真源 · 可粘贴图片';
+    renderNotebookPreview();
+    return saved;
+  };
+  const previous = state.notebookSaveChain || Promise.resolve();
+  const queued = previous.catch(() => {}).then(save);
+  state.notebookSaveChain = queued;
+  try { return await queued; }
+  finally { if (state.notebookSaveChain === queued) state.notebookSaveChain = null; }
 }
 
 function scheduleNotebookSave() {
@@ -1587,22 +1651,16 @@ function scheduleNotebookSave() {
   state.notebookSaveTimer = setTimeout(() => persistActiveNotebook().catch(error => { if (status) status.textContent = '保存失败'; showToast(error.message); }), 450);
 }
 
-async function pasteNotebookImage(event) {
-  const file = [...(event.clipboardData?.items || [])].find(item => item.kind === 'file' && item.type.startsWith('image/'))?.getAsFile();
-  if (!file || !state.activeNotebook) return;
-  event.preventDefault();
+async function uploadNotebookImage(file) {
+  if (!file || !state.activeNotebook) return '';
   try {
     const response = await fetch(`/api/notebook/notes/${state.activeNotebook.id}/assets?filename=${encodeURIComponent(file.name || `image-${Date.now()}.png`)}`, { method: 'POST', body: file });
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || '图片保存失败');
     const asset = await response.json();
-    const textarea = event.target;
-    const start = textarea.selectionStart;
-    const insertion = `${start && textarea.value[start - 1] !== '\n' ? '\n' : ''}${asset.markdown}\n`;
-    textarea.setRangeText(insertion, start, textarea.selectionEnd, 'end');
-    state.notebookContent = textarea.value;
-    scheduleNotebookSave();
     showToast('图片已保存到笔记资料包');
+    return asset.markdown;
   } catch (error) { showToast(error.message); }
+  return '';
 }
 
 async function submitActiveNotebook() {
@@ -2319,17 +2377,25 @@ elements.noteNameDialog.addEventListener('click', event => {
   if (event.target === elements.noteNameDialog || event.target.closest('[data-note-name-cancel]')) { closeNoteNameDialog(); setNotebookPinning(false); }
 });
 elements.notebookWorkspace.addEventListener('input', event => {
-  if (event.target.matches('[data-notebook-title], [data-notebook-content]')) {
-    if (event.target.matches('[data-notebook-content]')) state.notebookContent = event.target.value;
-    scheduleNotebookSave();
-  }
-});
-elements.notebookWorkspace.addEventListener('paste', event => {
-  if (event.target.matches('[data-notebook-content]')) pasteNotebookImage(event);
+  if (event.target.matches('[data-notebook-title]')) scheduleNotebookSave();
 });
 elements.notebookWorkspace.addEventListener('click', async event => {
   if (event.target.closest('[data-notebook-close]')) return closeNotebook();
   if (event.target.closest('[data-notebook-submit]')) return submitActiveNotebook();
+  const command = event.target.closest('[data-editor-command]')?.dataset.editorCommand;
+  if (command) { state.notebookEditor?.run(command); return; }
+  const outlineOffset = event.target.closest('[data-outline-offset]')?.dataset.outlineOffset;
+  if (outlineOffset !== undefined) { state.notebookEditor?.goToOffset(Number(outlineOffset)); return; }
+  if (event.target.closest('[data-notebook-outline-toggle]')) {
+    const outline = elements.notebookWorkspace.querySelector('[data-notebook-outline]');
+    const button = event.target.closest('[data-notebook-outline-toggle]');
+    if (outline) {
+      outline.hidden = !outline.hidden;
+      button.setAttribute('aria-expanded', String(!outline.hidden));
+      button.classList.toggle('is-active', !outline.hidden);
+    }
+    return;
+  }
   if (event.target.closest('[data-notebook-toggle-preview]')) {
     toggleNotebookSourcePreview();
     return;

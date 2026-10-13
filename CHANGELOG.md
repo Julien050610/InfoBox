@@ -2,6 +2,11 @@
 
 ## 尚未发布
 
+- 使用 CodeMirror 6 替换笔记正文 textarea，保留 Markdown 源文件作为唯一真源。
+- 编辑器支持 Markdown/GFM 与 YAML frontmatter、高亮、行号、折叠、撤销重做、查找替换、快捷格式化和标题大纲跳转。
+- 新增标题、粗体、斜体、链接、任务列表、表格、代码块和数学公式工具；粘贴图片继续保存为笔记相对附件。
+- Markdown 预览新增 GFM 表格、任务列表、删除线和本地 KaTeX 公式渲染，导出打印页同步支持这些内容。
+- CodeMirror 和 KaTeX 全部由本地工作台提供，不依赖 CDN；新增可重复执行的编辑器打包脚本与静态资源测试。
 - 新增 Obsidian 兼容的 `VaultRepository`，普通独立笔记开始以带 YAML frontmatter 的 `.md` 文件作为真源。
 - 按 `manual_tags`、`zotero_tags`、`agent_tags` 分离标签来源，并生成去重后的 `tags`；IB 更新时保留未知 YAML 字段与人工标签。
 - Vault 笔记使用稳定 ID 路径和相对附件路径，标题、标签或分类变化不会破坏附件引用。

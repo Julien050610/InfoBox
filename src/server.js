@@ -20,10 +20,11 @@ const SECURITY_HEADERS = {
 };
 const WEB_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'web');
 const PDFJS_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'node_modules', 'pdfjs-dist', 'build');
+const KATEX_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..', 'node_modules', 'katex', 'dist');
 const MIME_TYPES = new Map([
   ['.css', 'text/css; charset=utf-8'], ['.gif', 'image/gif'], ['.html', 'text/html; charset=utf-8'],
   ['.jpeg', 'image/jpeg'], ['.jpg', 'image/jpeg'], ['.js', 'text/javascript; charset=utf-8'],
-  ['.md', 'text/markdown; charset=utf-8'], ['.pdf', 'application/pdf'], ['.png', 'image/png'],
+  ['.md', 'text/markdown; charset=utf-8'], ['.pdf', 'application/pdf'], ['.png', 'image/png'], ['.woff2', 'font/woff2'], ['.woff', 'font/woff'], ['.ttf', 'font/ttf'],
   ['.svg', 'image/svg+xml'], ['.txt', 'text/plain; charset=utf-8'], ['.url', 'text/plain; charset=utf-8'],
   ['.webp', 'image/webp'], ['.mp3', 'audio/mpeg'], ['.m4a', 'audio/mp4'], ['.aac', 'audio/aac'],
   ['.wav', 'audio/wav'], ['.flac', 'audio/flac'], ['.ogg', 'audio/ogg'], ['.opus', 'audio/ogg'],
@@ -238,7 +239,7 @@ export function createApi(library) {
         const record = await library.noteContent(notebookPrintMatch[1]);
         if (!record) return send(response, 404, { error: 'Notebook note not found' });
         const body = markdownToHtml(record.content, { assetUrl: name => `/api/notebook/notes/${notebookPrintMatch[1]}/assets/${encodeURIComponent(name)}` });
-        const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeHtml(record.note.title)}</title><style>body{max-width:820px;margin:40px auto;padding:0 28px;color:#222;font:16px/1.75 system-ui,"Microsoft YaHei",sans-serif}h1,h2,h3{line-height:1.3}img{max-width:100%;height:auto}pre{padding:16px;overflow:auto;background:#f3f1eb}code{font-family:ui-monospace,monospace}button{position:fixed;right:24px;top:20px;padding:10px 16px;border:0;border-radius:4px;color:white;background:#173f35}@media print{button{display:none}body{margin:0;max-width:none}}</style></head><body><button onclick="window.print()">保存为 PDF</button><article>${body}</article></body></html>`;
+        const html = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${escapeHtml(record.note.title)}</title><link rel="stylesheet" href="/vendor/katex.min.css"><style>body{max-width:820px;margin:40px auto;padding:0 28px;color:#222;font:16px/1.75 system-ui,"Microsoft YaHei",sans-serif}h1,h2,h3{line-height:1.3}img{max-width:100%;height:auto}pre{padding:16px;overflow:auto;background:#f3f1eb}code{font-family:ui-monospace,monospace}table{width:100%;border-collapse:collapse}th,td{padding:8px 10px;border:1px solid #ccc;text-align:left}.task-list-item{list-style:none}.math-block{text-align:center;margin:20px 0}button{position:fixed;right:24px;top:20px;padding:10px 16px;border:0;border-radius:4px;color:white;background:#173f35}@media print{button{display:none}body{margin:0;max-width:none}}</style></head><body><button onclick="window.print()">保存为 PDF</button><article>${body}</article><script src="/vendor/katex.min.js"></script><script>document.querySelectorAll('[data-math]').forEach(function(node){katex.render(node.textContent||'',node,{displayMode:node.classList.contains('math-block'),throwOnError:false,strict:'ignore'})})</script></body></html>`;
         return sendBuffer(response, 200, Buffer.from(html), { 'content-type': 'text/html; charset=utf-8' });
       }
       const stickyConvertMatch = url.pathname.match(/^\/api\/items\/([0-9a-f-]{36})\/notes\/([0-9a-f-]{36})\/convert$/);
@@ -366,10 +367,19 @@ export function createApi(library) {
       const staticFiles = new Map([
         ['/', 'index.html'], ['/index.html', 'index.html'], ['/styles.css', 'styles.css'], ['/app.js', 'app.js'], ['/markdown.js', 'markdown.js'], ['/favicon.svg', 'favicon.svg'],
         ['/api/client.js', 'api/client.js'], ['/state/app-state.js', 'state/app-state.js'], ['/ui/dom.js', 'ui/dom.js'], ['/library/filtering.js', 'library/filtering.js'],
+        ['/editor/math.js', 'editor/math.js'], ['/vendor/codemirror-editor.js', 'vendor/codemirror-editor.js'],
       ]);
       const vendorFiles = new Map([['/vendor/pdf.mjs', 'pdf.mjs'], ['/vendor/pdf.worker.mjs', 'pdf.worker.mjs']]);
       if (request.method === 'GET' && vendorFiles.has(url.pathname)) {
         return sendFile(request, response, join(PDFJS_ROOT, vendorFiles.get(url.pathname)), { type: 'text/javascript; charset=utf-8', cache: 'public, max-age=86400' });
+      }
+      const katexFiles = new Map([['/vendor/katex.min.js', 'katex.min.js'], ['/vendor/katex.min.css', 'katex.min.css']]);
+      if (request.method === 'GET' && katexFiles.has(url.pathname)) {
+        return sendFile(request, response, join(KATEX_ROOT, katexFiles.get(url.pathname)), { cache: 'public, max-age=86400' });
+      }
+      const katexFont = url.pathname.match(/^\/vendor\/fonts\/([A-Za-z0-9._-]+\.(?:woff2?|ttf))$/);
+      if (request.method === 'GET' && katexFont) {
+        return sendFile(request, response, join(KATEX_ROOT, 'fonts', katexFont[1]), { cache: 'public, max-age=86400' });
       }
       if (request.method === 'GET' && staticFiles.has(url.pathname)) {
         return sendFile(request, response, join(WEB_ROOT, staticFiles.get(url.pathname)), { cache: url.pathname === '/' ? 'no-store' : 'public, max-age=300' });

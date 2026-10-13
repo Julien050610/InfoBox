@@ -421,6 +421,31 @@ test('rejects cross-origin writes and returns stable error codes', async () => {
   }
 });
 
+test('serves the local CodeMirror bundle and KaTeX assets without a CDN', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'infobox-editor-assets-'));
+  const library = new Library({ root });
+  await library.init({ watchInbox: false });
+  const server = createApi(library);
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    const [editor, katexScript, katexStyle] = await Promise.all([
+      fetch(`${base}/vendor/codemirror-editor.js`), fetch(`${base}/vendor/katex.min.js`), fetch(`${base}/vendor/katex.min.css`),
+    ]);
+    assert.equal(editor.status, 200);
+    assert.match(editor.headers.get('content-type'), /javascript/);
+    assert.match(await editor.text(), /createMarkdownEditor/);
+    assert.equal(katexScript.status, 200);
+    assert.equal(katexStyle.status, 200);
+    assert.match(katexStyle.headers.get('content-type'), /text\/css/);
+  } finally {
+    library.close();
+    await new Promise(resolve => server.close(resolve));
+    if (!root.startsWith(join(tmpdir(), 'infobox-editor-assets-'))) throw new Error('Unsafe test cleanup path');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('routes content with no reliable category to review', async () => {
   const root = await mkdtemp(join(tmpdir(), 'infobox-test-'));
   const library = new Library({ root,

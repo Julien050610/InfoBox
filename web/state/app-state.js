@@ -46,6 +46,8 @@ export const state = {
   pendingNoteCreate: null,
   boundNotebookNotes: [],
   activeNotebook: null,
+  notebookEditor: null,
+  notebookSaveChain: null,
   notebookContent: '',
   notebookPreview: false,
   notebookSaveTimer: null,
