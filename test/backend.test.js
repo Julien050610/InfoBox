@@ -280,7 +280,7 @@ test('uploads, files, deduplicates, and updates manual quality score', async () 
     const workbench = await fetch(base);
     assert.match(await workbench.text(), /InfoBox/);
     const health = await (await fetch(`${base}/health`)).json();
-    assert.equal(health.api_version, 15);
+    assert.equal(health.api_version, 16);
     const pdfRuntime = await fetch(`${base}/vendor/pdf.mjs`);
     assert.equal(pdfRuntime.status, 200);
     assert.match(await pdfRuntime.text(), /getDocument/);
@@ -554,6 +554,66 @@ test('searches full text and persists organization metadata, views, and relation
   }
 });
 
+test('keeps stable folder metadata and unified connections across folder moves', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'infobox-folder-relations-'));
+  const library = new Library({ root });
+  await library.init({ watchInbox: false });
+  try {
+    const topic = await library.addFolder({ name: 'Topic' });
+    const archive = await library.addFolder({ name: 'Archive' });
+    const sourceId = '13131313-1313-4313-8313-131313131313';
+    const targetId = '14141414-1414-4414-8414-141414141414';
+    for (const record of [
+      { id: sourceId, title: 'Source material', category: 'Topic' },
+      { id: targetId, title: 'Target material', category: 'Archive' },
+    ]) {
+      const folder = join(root, 'library', record.category);
+      await mkdir(folder, { recursive: true });
+      const asset = join(folder, `${record.id}.pdf`);
+      await writeFile(asset, 'pdf');
+      await writeFile(join(folder, `${record.id}.json`), JSON.stringify({
+        ...record, tags: [], status: 'ready', kind: 'pdf', summary: '', quality_score: null,
+        published_at: null, received_at: '2026-10-18', asset_path: asset, original_name: `${record.id}.pdf`,
+      }));
+    }
+
+    const updatedFolder = await library.updateFolderMetadata(topic.id, { summary: '主题资料', tags: ['主题', '研究'] });
+    assert.equal(updatedFolder.summary, '主题资料');
+    assert.deepEqual(updatedFolder.tags, ['主题', '研究']);
+
+    const folderToItem = await library.addRelation({ source_id: topic.id, target_id: targetId, type: 'related' });
+    const folderToFolder = await library.addRelation({ source_id: topic.id, target_id: archive.id, type: 'supports' });
+    const itemToItem = await library.addRelation({ source_id: sourceId, target_id: targetId, type: 'cites' });
+    assert.deepEqual(new Set((await library.relations()).map(relation => relation.id)), new Set([folderToItem.id, folderToFolder.id, itemToItem.id]));
+
+    await library.moveFolder({ source: 'Topic', name: 'Renamed Topic', parent: '' });
+    const movedFolder = (await library.folderRecords()).find(folder => folder.id === topic.id);
+    assert.equal(movedFolder.path, 'Renamed Topic');
+    assert.equal(movedFolder.summary, '主题资料');
+    assert.deepEqual(movedFolder.tags, ['主题', '研究']);
+    assert.equal((await library.relations()).filter(relation => relation.source_id === topic.id || relation.target_id === topic.id).length, 2);
+
+    const note = await library.createLibraryNote({ title: 'Linked note', category: 'Notes', content: 'Connection content' });
+    const ownership = await library.addRelation({ source_id: sourceId, target_id: note.id, type: 'belongs_to' });
+    assert.equal(ownership.source_id, note.id);
+    assert.equal(ownership.target_id, sourceId);
+    const ownedNote = (await library.items()).find(item => item.id === note.id);
+    assert.equal(ownedNote.category, 'Renamed Topic');
+    assert.deepEqual(ownedNote.linked_item_ids, [sourceId]);
+    assert.deepEqual((await library.items()).find(item => item.id === sourceId).linked_note_ids, [note.id]);
+
+    await library.deleteRelation(ownership.id);
+    const detachedNote = (await library.items()).find(item => item.id === note.id);
+    assert.deepEqual(detachedNote.linked_item_ids, []);
+    assert.equal(detachedNote.bound_item_id, null);
+    assert.deepEqual((await library.items()).find(item => item.id === sourceId).linked_note_ids, []);
+  } finally {
+    library.close();
+    if (!root.startsWith(join(tmpdir(), 'infobox-folder-relations-'))) throw new Error('Unsafe test cleanup path');
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test('creates two-level folders and moves a ready item between them', async () => {
   const root = await mkdtemp(join(tmpdir(), 'infobox-test-'));
   const library = new Library({ root });
@@ -780,7 +840,7 @@ test('creates temporary notes, preserves pasted images, and classifies them thro
   }
 });
 
-test('bound notes follow their source and return to the inbox when the source is deleted', async () => {
+test('linked notes keep bidirectional links, follow their source, and return to the inbox when the source is deleted', async () => {
   const root = await mkdtemp(join(tmpdir(), 'infobox-bound-note-'));
   const library = new Library({ root });
   await library.init({ watchInbox: false });
@@ -792,6 +852,18 @@ test('bound notes follow their source and return to the inbox when the source is
     await writeFile(sourceAsset, 'pdf');
     await writeFile(join(sourceFolder, 'source.json'), JSON.stringify({ id: sourceId, title: 'Source', category: 'AI', tags: [], status: 'ready', kind: 'pdf', summary: '', quality_score: null, published_at: null, received_at: '2026-09-25', asset_path: sourceAsset, original_name: 'source.pdf' }));
     const note = await library.createLibraryNote({ title: '绑定笔记', content: '锚定内容', bound_item_id: sourceId, anchor: { type: 'pdf', page: 1, x: .5, y: .4 } });
+    assert.equal(note.anchor, null);
+    assert.deepEqual(note.linked_item_ids, [sourceId]);
+    assert.deepEqual((await library.items()).find(value => value.id === sourceId).linked_note_ids, [note.id]);
+    const ownership = (await library.relations()).find(relation => relation.type === 'belongs_to');
+    assert.equal(ownership.source_id, note.id);
+    assert.equal(ownership.target_id, sourceId);
+
+    const removedNote = await library.deleteItem(note.id);
+    assert.deepEqual((await library.items()).find(value => value.id === sourceId).linked_note_ids, []);
+    await library.restoreTrashEntry(removedNote.trash_id);
+    assert.deepEqual((await library.items()).find(value => value.id === sourceId).linked_note_ids, [note.id]);
+
     await library.patchItem(sourceId, { category: 'Computer Science/AI' });
     const moved = (await library.items()).find(value => value.id === note.id);
     assert.equal(moved.category, 'Computer Science/AI');
@@ -800,7 +872,9 @@ test('bound notes follow their source and return to the inbox when the source is
     assert.equal((await library.items()).some(value => value.id === note.id), false);
     const inbox = await library.inboxFiles();
     assert.equal(inbox.find(value => value.note_id === note.id).inbox_kind, 'note');
-    assert.equal((await library.noteContent(note.id)).content, '锚定内容');
+    const detached = await library.noteContent(note.id);
+    assert.equal(detached.content, '锚定内容');
+    assert.deepEqual(detached.note.linked_item_ids, []);
   } finally {
     library.close();
     if (!root.startsWith(join(tmpdir(), 'infobox-bound-note-'))) throw new Error('Unsafe test cleanup path');

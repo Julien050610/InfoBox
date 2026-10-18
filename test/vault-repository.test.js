@@ -107,7 +107,10 @@ test('new independent notes use portable Markdown while bound notes stay legacy 
     }));
     const bound = await library.createLibraryNote({ title: '绑定笔记', bound_item_id: 'paper-source', content: '绑定正文' });
     assert.notEqual(bound.storage, 'vault');
+    assert.equal(bound.anchor, null);
+    assert.deepEqual(bound.linked_item_ids, ['paper-source']);
     assert.ok((await library.items()).find(item => item.id === bound.id).metadata_path);
+    assert.deepEqual((await library.items()).find(item => item.id === 'paper-source').linked_note_ids, [bound.id]);
   } finally { library.close(); }
 }));
 

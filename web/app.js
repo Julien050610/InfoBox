@@ -16,6 +16,7 @@ function navigationSnapshot() {
     scope: state.scope,
     category: state.category,
     selectedId: state.selectedId,
+    selectedFolderId: state.selectedFolderId,
     tab: state.tab,
     query: state.query,
     filters: structuredClone(state.filters),
@@ -46,6 +47,7 @@ async function restoreNavigation(snapshot) {
   state.scope = snapshot.scope || 'all';
   state.category = snapshot.category || '';
   state.selectedId = snapshot.selectedId || null;
+  state.selectedFolderId = snapshot.selectedFolderId || null;
   state.tab = snapshot.tab || 'asset';
   state.query = snapshot.query || '';
   state.filters = structuredClone(snapshot.filters || state.filters);
@@ -364,7 +366,10 @@ function itemRowHtml(item) {
     </span>
     <span class="item-tags">${(item.tags || []).slice(0, 2).map(tag => `<span class="mini-tag">${escapeHtml(tag)}</span>`).join('')}</span>
     <span class="item-date ${item.status === 'review' ? 'review-badge' : ''}">${escapeHtml(item.published_at || item.received_at || '日期未知')}</span>
-    ${item.status === 'ready' ? `<button class="row-move-button" type="button" data-move-item="${item.id}" aria-label="移动 ${escapeHtml(item.title)}">移动</button>` : '<span></span>'}
+    <span class="row-actions">
+      ${item.status === 'ready' ? `<button class="row-action-button row-move-button" type="button" data-move-item="${item.id}" aria-label="移动 ${escapeHtml(item.title)}">移动</button>` : ''}
+      <button class="row-action-button row-delete-button" type="button" data-delete-list-item="${item.id}" aria-label="删除 ${escapeHtml(item.title)}">删除</button>
+    </span>
   </div>`;
 }
 
@@ -374,8 +379,17 @@ function folderRowHtml(folder) {
     <span class="item-title"><strong>${escapeHtml(folder.name)}</strong><small>${folder.children?.length || 0} 个子文件夹 · ${folder.count} 项资料</small></span>
     <span class="item-tags"><span class="mini-tag">文件夹</span></span>
     <span class="item-date">进入 ›</span>
-    <button class="row-move-button" type="button" data-move-folder="${escapeHtml(folder.path)}" aria-label="移动 ${escapeHtml(folder.name)}">移动</button>
+    <span class="row-actions">
+      <button class="row-action-button row-move-button" type="button" data-move-folder="${escapeHtml(folder.path)}" aria-label="移动 ${escapeHtml(folder.name)}">移动</button>
+      <button class="row-action-button row-delete-button" type="button" data-delete-list-folder="${escapeHtml(folder.path)}" aria-label="删除 ${escapeHtml(folder.name)}">删除</button>
+    </span>
   </div>`;
+}
+
+function linkedMaterialId(note) {
+  const ownership = state.relations.find(relation => relation.type === 'belongs_to' && (relation.source_id === note?.id || relation.target_id === note?.id));
+  if (ownership) return ownership.source_id === note.id ? ownership.target_id : ownership.source_id;
+  return Array.isArray(note?.linked_item_ids) && note.linked_item_ids.length ? note.linked_item_ids[0] : note?.bound_item_id || null;
 }
 
 function renderList() {
@@ -388,7 +402,7 @@ function renderList() {
     elements.resultCount.textContent = `${notes.length} 篇草稿`;
     elements.list.closest('.catalog')?.querySelector('.catalog-hint')?.replaceChildren(document.createTextNode('完成后可手动送入收件箱分类'));
     elements.contentColumn.classList.remove('is-folder-browser');
-    elements.list.innerHTML = `<button class="temporary-note-create" type="button" data-new-temporary-note>＋ 新建临时笔记</button>${notes.map(note => `<div class="item-row notebook-row" data-open-notebook="${note.id}" tabindex="0"><span class="item-type note">笔</span><span class="item-title"><strong>${escapeHtml(note.title)}</strong><small>临时草稿 · ${new Date(note.updated_at).toLocaleString('zh-CN')}</small></span><span class="item-tags"><span class="mini-tag">Markdown</span></span><span class="item-date">编辑 ›</span><span></span></div>`).join('') || '<div class="empty-list">还没有临时笔记</div>'}`;
+    elements.list.innerHTML = `<button class="temporary-note-create" type="button" data-new-temporary-note>＋ 新建临时笔记</button>${notes.map(note => `<div class="item-row notebook-row" data-open-notebook="${note.id}" tabindex="0"><span class="item-type note">笔</span><span class="item-title"><strong>${escapeHtml(note.title)}</strong><small>临时草稿 · ${new Date(note.updated_at).toLocaleString('zh-CN')}</small></span><span class="item-tags"><span class="mini-tag">Markdown</span></span><span class="item-date">编辑 ›</span><span class="row-actions"><button class="row-action-button row-delete-button" type="button" data-delete-temporary-note="${note.id}" aria-label="删除 ${escapeHtml(note.title)}">删除</button></span></div>`).join('') || '<div class="empty-list">还没有临时笔记</div>'}`;
     return;
   }
   if (state.scope === 'inbox') {
@@ -445,16 +459,19 @@ function graphData() {
   const allItemsById = new Map(state.items.map(item => [item.id, item]));
   const includedIds = new Set(items.map(item => item.id));
   for (const note of [...items]) {
-    if (!note.bound_item_id || includedIds.has(note.bound_item_id)) continue;
-    const source = allItemsById.get(note.bound_item_id);
+    const materialId = linkedMaterialId(note);
+    if (!materialId || includedIds.has(materialId)) continue;
+    const source = allItemsById.get(materialId);
     if (source?.status !== 'ready') continue;
     items.push(source);
     includedIds.add(source.id);
   }
   const palette = ['#2f7668', '#bd7047', '#607db0', '#9a7a32', '#7d6098', '#64854b'];
-  const nodes = [{ id: 'root', type: 'root', label: 'Library', depth: 0, color: '#173f35' }];
+  const rootFolder = folderRecordByPath('');
+  const nodes = [{ id: 'root', entityId: rootFolder?.id, type: 'root', label: 'Library', path: '', depth: 0, color: '#173f35' }];
   const edges = [];
   const known = new Set(['root']);
+  const entityToGraph = new Map(rootFolder ? [[rootFolder.id, 'root']] : []);
   const topFolders = [];
   const addFolderPath = pathValue => {
     let parent = 'root';
@@ -464,11 +481,13 @@ function graphData() {
     if (!topFolders.includes(topPath)) topFolders.push(topPath);
     parts.forEach((part, index) => {
       const path = parts.slice(0, index + 1).join('/');
-      const id = `folder:${path}`;
+      const folder = folderRecordByPath(path);
+      const id = `folder:${folder?.id || path}`;
       if (!known.has(id)) {
         known.add(id);
-        nodes.push({ id, type: 'folder', label: part, path, topPath, depth: index + 1 });
+        nodes.push({ id, entityId: folder?.id, type: 'folder', label: part, path, topPath, depth: index + 1 });
         edges.push({ source: parent, target: id, type: 'structure' });
+        if (folder?.id) entityToGraph.set(folder.id, id);
       }
       parent = id;
     });
@@ -478,29 +497,36 @@ function graphData() {
   addTreeFolders(state.tree?.children || []);
   const boundNotes = [];
   for (const item of items) {
-    if (item.kind === 'note' && item.bound_item_id) {
+    if (item.kind === 'note' && linkedMaterialId(item)) {
       boundNotes.push(item);
       continue;
     }
     const parts = String(item.category || '未分类').split('/').filter(Boolean).length ? String(item.category || '未分类').split('/').filter(Boolean) : ['未分类'];
     const topPath = parts[0];
     const parent = addFolderPath(parts.join('/'));
-    nodes.push({ id: item.id, type: 'item', label: item.title, item, topPath, depth: parts.length + 1 });
+    nodes.push({ id: item.id, entityId: item.id, type: 'item', label: item.title, item, topPath, depth: parts.length + 1 });
+    entityToGraph.set(item.id, item.id);
     edges.push({ source: parent, target: item.id, type: 'structure' });
   }
   for (const item of boundNotes) {
-    const sourceNode = nodes.find(node => node.id === item.bound_item_id);
+    const sourceNode = nodes.find(node => node.id === linkedMaterialId(item));
     const parts = String(item.category || '未分类').split('/').filter(Boolean).length ? String(item.category || '未分类').split('/').filter(Boolean) : ['未分类'];
     const topPath = sourceNode?.topPath || parts[0];
     const fallbackParent = addFolderPath(parts.join('/'));
     const parent = sourceNode?.id || fallbackParent;
-    nodes.push({ id: item.id, type: 'item', label: item.title, item, topPath, depth: sourceNode ? sourceNode.depth + 1 : parts.length + 1 });
-    edges.push({ source: parent, target: item.id, type: 'structure', label: sourceNode ? '锚定笔记' : '文件夹层级' });
+    nodes.push({ id: item.id, entityId: item.id, type: 'item', label: item.title, item, topPath, depth: sourceNode ? sourceNode.depth + 1 : parts.length + 1 });
+    entityToGraph.set(item.id, item.id);
+    edges.push({ source: parent, target: item.id, type: 'structure', ownership: Boolean(sourceNode), bidirectional: Boolean(sourceNode), label: sourceNode ? '资料 ↔ 笔记' : '文件夹层级' });
   }
   const colors = new Map(topFolders.map((folder, index) => [folder, palette[index % palette.length]]));
   nodes.forEach(node => { if (node.type !== 'root') node.color = colors.get(node.topPath) || palette[0]; });
-  const ids = new Set(items.map(item => item.id));
-  for (const relation of state.relations) if (ids.has(relation.source_id) && ids.has(relation.target_id)) edges.push({ source: relation.source_id, target: relation.target_id, type: 'relation', label: relationNames[relation.type] });
+  for (const relation of state.relations) {
+    const source = entityToGraph.get(relation.source_id);
+    const target = entityToGraph.get(relation.target_id);
+    if (!source || !target) continue;
+    if (relation.type === 'belongs_to' && edges.some(edge => edge.ownership && ((edge.source === source && edge.target === target) || (edge.source === target && edge.target === source)))) continue;
+    edges.push({ source, target, type: 'relation', relationType: relation.type, bidirectional: true, label: relationNames[relation.type] || '相关' });
+  }
   const similarity = [];
   for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
     if (items[i].category === items[j].category) continue;
@@ -511,7 +537,7 @@ function graphData() {
   }
   similarity.sort((a, b) => b.score - a.score);
   edges.push(...similarity.slice(0, 120));
-  return { nodes, edges, items, matchingIds, filtering };
+  return { nodes, edges, items, matchingIds, filtering, entityToGraph };
 }
 
 function renderGraph() {
@@ -525,37 +551,52 @@ function renderGraph() {
   const height = Math.max(430, elements.graphCanvas.clientHeight || 620);
   const byId = new Map(nodes.map(node => [node.id, node]));
   if (!byId.has(state.graphFocusId)) state.graphFocusId = 'root';
-  const focusIds = new Set();
-  if (state.graphFocusId === 'root') nodes.forEach(node => focusIds.add(node.id));
-  else {
-    const children = new Map();
-    for (const edge of edges.filter(edge => edge.type === 'structure')) {
-      if (!children.has(edge.source)) children.set(edge.source, []);
-      children.get(edge.source).push(edge.target);
-    }
-    const pending = [state.graphFocusId];
-    while (pending.length) {
-      const id = pending.shift();
-      if (focusIds.has(id)) continue;
-      focusIds.add(id);
-      pending.push(...(children.get(id) || []));
-    }
-  }
-  const filterIds = new Set(['root']);
-  if (filtering) for (const item of items) {
-    if (!matchingIds.has(item.id)) continue;
-    filterIds.add(item.id);
-    if (item.kind === 'note' && item.bound_item_id) filterIds.add(item.bound_item_id);
-    const parts = String(item.category || '未分类').split('/').filter(Boolean);
-    parts.forEach((_, index) => filterIds.add(`folder:${parts.slice(0, index + 1).join('/')}`));
-  }
-  const activeIds = filtering ? new Set([...focusIds].filter(id => filterIds.has(id))) : focusIds;
   const structuralEdges = edges.filter(edge => edge.type === 'structure');
   const children = new Map();
   for (const edge of structuralEdges) {
     if (!children.has(edge.source)) children.set(edge.source, []);
     children.get(edge.source).push(edge.target);
   }
+  const focusIds = new Set();
+  const focusEdges = new Set();
+  if (state.graphFocusId === 'root') {
+    nodes.forEach(node => focusIds.add(node.id));
+    edges.forEach(edge => focusEdges.add(edge));
+  }
+  else {
+    const focusedNode = byId.get(state.graphFocusId);
+    focusIds.add(state.graphFocusId);
+    if (focusedNode?.type === 'folder') {
+      const pending = [state.graphFocusId];
+      while (pending.length) {
+        const id = pending.shift();
+        for (const child of children.get(id) || []) {
+          focusIds.add(child);
+          pending.push(child);
+          const edge = structuralEdges.find(value => value.source === id && value.target === child);
+          if (edge) focusEdges.add(edge);
+        }
+      }
+    }
+    for (const edge of edges) {
+      if (edge.source !== state.graphFocusId && edge.target !== state.graphFocusId) continue;
+      focusEdges.add(edge);
+      focusIds.add(edge.source);
+      focusIds.add(edge.target);
+    }
+  }
+  const filterIds = new Set(['root']);
+  if (filtering) for (const item of items) {
+    if (!matchingIds.has(item.id)) continue;
+    filterIds.add(item.id);
+    if (item.kind === 'note' && linkedMaterialId(item)) filterIds.add(linkedMaterialId(item));
+    const parts = String(item.category || '未分类').split('/').filter(Boolean);
+    parts.forEach((_, index) => {
+      const folder = folderRecordByPath(parts.slice(0, index + 1).join('/'));
+      if (folder) filterIds.add(`folder:${folder.id}`);
+    });
+  }
+  const activeIds = filtering ? new Set([...focusIds].filter(id => filterIds.has(id))) : focusIds;
   const leafIds = [];
   const collectLeaves = id => {
     const descendants = children.get(id) || [];
@@ -582,10 +623,13 @@ function renderGraph() {
     state.graphViewport.scale = Math.max(.45, (height - 18) / worldHeight);
     state.graphViewport.y = (height - worldHeight * state.graphViewport.scale) / 2;
   }
-  const edgeHtml = edges.map(edge => {
+  const orderedEdges = [...edges].sort((a, b) => Number(a.type === 'structure') - Number(b.type === 'structure'));
+  const edgeHtml = orderedEdges.map(edge => {
     const a = byId.get(edge.source), b = byId.get(edge.target);
     if (!a || !b) return '';
-    const muted = !activeIds.has(edge.source) || !activeIds.has(edge.target);
+    const focusMuted = state.graphFocusId !== 'root' && !focusEdges.has(edge);
+    const muted = focusMuted || !activeIds.has(edge.source) || !activeIds.has(edge.target);
+    const highlighted = state.graphFocusId !== 'root' && focusEdges.has(edge);
     const startRadius = a.type === 'root' ? 15 : a.type === 'folder' && a.depth === 1 ? 13 : a.type === 'folder' ? 10 : 6;
     const endRadius = b.type === 'folder' && b.depth === 1 ? 13 : b.type === 'folder' ? 10 : 6;
     let path;
@@ -600,7 +644,7 @@ function renderGraph() {
       path = `M ${a.x.toFixed(1)} ${a.y.toFixed(1)} Q ${middleX.toFixed(1)} ${arcY.toFixed(1)}, ${b.x.toFixed(1)} ${b.y.toFixed(1)}`;
     }
     const stroke = edge.type === 'structure' ? (b.color || '#718078') : '';
-    return `<path class="graph-edge ${edge.type} ${muted ? 'is-muted' : ''}" d="${path}" ${stroke ? `style="stroke:${stroke}"` : ''}><title>${escapeHtml(edge.label || (edge.type === 'structure' ? '文件夹层级' : '资料关联'))}</title></path>`;
+    return `<path class="graph-edge ${edge.type} ${edge.ownership ? 'note-link' : ''} ${edge.bidirectional ? 'bidirectional' : ''} ${highlighted ? 'is-highlighted' : ''} ${muted ? 'is-muted' : ''}" d="${path}" ${stroke ? `style="stroke:${stroke}"` : ''}><title>${escapeHtml(edge.label || (edge.type === 'structure' ? '文件夹层级' : '双向连接'))}</title></path>`;
   }).join('');
   const nodeHtml = nodes.map(node => {
     const radius = node.type === 'root' ? 15 : node.type === 'folder' && node.depth === 1 ? 13 : node.type === 'folder' ? 10 : 6;
@@ -608,12 +652,12 @@ function renderGraph() {
     const shortLabel = node.label.length > shortLimit ? `${node.label.slice(0, shortLimit)}…` : node.label;
     const detailLabel = node.label.length > 28 ? `${node.label.slice(0, 28)}…` : node.label;
     const detailWidth = Math.min(265, Math.max(92, detailLabel.length * 10 + 20));
-    const data = node.type === 'item' ? `data-graph-item="${node.id}"` : node.type === 'folder' ? `data-graph-category="${escapeHtml(node.path)}" data-graph-node="${node.id}"` : 'data-graph-root data-graph-node="root"';
+    const data = node.type === 'item' ? `data-graph-item="${node.id}"` : node.type === 'folder' ? `data-graph-category="${escapeHtml(node.path)}" data-graph-folder-id="${node.entityId || ''}" data-graph-node="${node.id}"` : `data-graph-root data-graph-folder-id="${node.entityId || ''}" data-graph-node="root"`;
     const detailY = node.y < 70 ? 15 : -41;
     const detail = node.type === 'item' ? `<g class="graph-detail-label"><rect x="${(-detailWidth / 2).toFixed(1)}" y="${detailY}" width="${detailWidth}" height="26" rx="6"></rect><text x="0" y="${detailY + 17}" text-anchor="middle">${escapeHtml(detailLabel)}</text></g>` : '';
-    return `<g class="graph-node ${node.type} ${node.id === state.selectedId ? 'is-selected' : ''} ${node.id === state.graphFocusId ? 'is-focused' : ''} ${activeIds.has(node.id) ? '' : 'is-muted'}" style="--node-color:${node.color}" transform="translate(${node.x.toFixed(1)} ${node.y.toFixed(1)})" ${data}><circle class="graph-hit-area" r="${radius + 5}"></circle><circle class="graph-node-dot" r="${radius}"></circle><text class="graph-short-label" x="${radius + 7}" y="3">${escapeHtml(shortLabel)}</text>${detail}<title>${escapeHtml(node.label)}</title></g>`;
+    return `<g class="graph-node ${node.type} ${node.id === state.selectedId || node.entityId === state.selectedFolderId ? 'is-selected' : ''} ${node.id === state.graphFocusId ? 'is-focused' : ''} ${activeIds.has(node.id) ? '' : 'is-muted'}" style="--node-color:${node.color}" transform="translate(${node.x.toFixed(1)} ${node.y.toFixed(1)})" ${data}><circle class="graph-hit-area" r="${radius + 5}"></circle><circle class="graph-node-dot" r="${radius}"></circle><text class="graph-short-label" x="${radius + 7}" y="3">${escapeHtml(shortLabel)}</text>${detail}<title>${escapeHtml(node.label)}</title></g>`;
   }).join('');
-  elements.graphCanvas.innerHTML = `<svg class="knowledge-graph" viewBox="0 0 ${width} ${height}" role="img" aria-label="文件夹与资料关系图"><g class="graph-stage">${edgeHtml}${nodeHtml}</g></svg>`;
+  elements.graphCanvas.innerHTML = `<svg class="knowledge-graph" viewBox="0 0 ${width} ${height}" role="img" aria-label="文件夹与资料关系图"><defs><marker id="graph-relation-arrow" viewBox="0 0 8 8" refX="6.4" refY="4" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M 0 0 L 8 4 L 0 8 z"></path></marker><marker id="graph-highlight-arrow" viewBox="0 0 8 8" refX="6.4" refY="4" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M 0 0 L 8 4 L 0 8 z"></path></marker><marker id="graph-note-link-arrow" viewBox="0 0 8 8" refX="6.4" refY="4" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M 0 0 L 8 4 L 0 8 z"></path></marker></defs><g class="graph-stage">${edgeHtml}${nodeHtml}</g></svg>`;
   elements.graphCanvas.querySelectorAll('.graph-node.item').forEach(node => {
     node.addEventListener('pointerenter', () => node.classList.add('is-hovered'));
     node.addEventListener('pointerleave', () => node.classList.remove('is-hovered'));
@@ -659,6 +703,7 @@ function openGraphHome({ record = true } = {}) {
   state.scope = 'all';
   state.category = '';
   state.selectedId = null;
+  state.selectedFolderId = null;
   state.graphFocusId = 'root';
   state.query = '';
   state.searchMatches = new Map();
@@ -670,10 +715,12 @@ function openGraphHome({ record = true } = {}) {
   if (record) pushNavigation();
 }
 
-function focusGraphNode(id, selectedId = null) {
+function focusGraphNode(id, selectedId = null, selectedFolderId = null) {
   state.graphFocusId = id || 'root';
   state.selectedId = selectedId;
+  state.selectedFolderId = selectedFolderId;
   state.editingItemId = null;
+  state.editingFolderId = null;
   renderInspector();
   renderGraph();
   pushNavigation();
@@ -681,6 +728,7 @@ function focusGraphNode(id, selectedId = null) {
 
 function openGraphItem(id) {
   state.selectedId = id;
+  state.selectedFolderId = null;
   state.graphFocusId = id;
   state.tab = state.items.find(item => item.id === id)?.reading_position?.view || 'asset';
   state.notes = [];
@@ -697,6 +745,7 @@ function openGraphFolder(path = '') {
   state.scope = path ? 'category' : 'all';
   state.category = path;
   state.selectedId = null;
+  state.selectedFolderId = folderRecordByPath(path)?.id || null;
   state.editingItemId = null;
   state.query = '';
   state.searchMatches = new Map();
@@ -919,13 +968,52 @@ function stars(score, interactive = false) {
     : `<span class="star ${score && index < score ? 'is-filled' : ''}">★</span>`).join('');
 }
 
-function relationBuilderHtml(candidates) {
-  if (!candidates.length) return '<p class="workflow-hint">知识库中还没有其他可关联的资料。</p>';
+function folderRecordByPath(path = '') {
+  return state.folderRecords.find(folder => folder.path === path) || null;
+}
+
+function selectedFolderRecord() {
+  if (state.selectedId) return null;
+  const explicit = state.folderRecords.find(folder => folder.id === state.selectedFolderId);
+  if (explicit) return explicit;
+  if (!state.graphMode && (state.scope === 'all' || state.scope === 'category')) return folderRecordByPath(state.scope === 'category' ? state.category : '');
+  return null;
+}
+
+function relationEntity(id) {
+  const item = state.items.find(value => value.id === id);
+  if (item) return { ...item, entity_type: item.kind === 'note' ? 'note' : 'item' };
+  const folder = state.folderRecords.find(value => value.id === id);
+  return folder ? { ...folder, title: folder.name, category: folder.path, entity_type: 'folder' } : null;
+}
+
+function relationCandidatesFor(entity) {
+  return [
+    ...state.folderRecords.map(folder => ({ ...folder, title: folder.name, category: folder.path, entity_type: 'folder' })),
+    ...state.items.filter(item => item.status === 'ready').map(item => ({ ...item, entity_type: item.kind === 'note' ? 'note' : 'item' })),
+  ].filter(candidate => candidate.id !== entity.id);
+}
+
+function relationListHtml(entity, editing) {
+  const relations = state.relations.filter(relation => relation.source_id === entity.id || relation.target_id === entity.id);
+  return `<section class="inspector-section">
+    <p class="inspector-label">双向连接</p>
+    <div class="relation-list">${relations.length ? relations.map(relation => {
+      const otherId = relation.source_id === entity.id ? relation.target_id : relation.source_id;
+      const other = relationEntity(otherId);
+      const type = other?.entity_type === 'folder' ? '文件夹' : other?.entity_type === 'note' ? '笔记' : '资料';
+      return `<div class="relation-row ${editing ? 'is-editing' : ''}"><span class="relation-type">${escapeHtml(relationNames[relation.type] || '相关')}</span><span class="relation-title" title="${escapeHtml(other?.title || '节点已删除')}"><small>${type}</small>${escapeHtml(other?.title || '节点已删除')}</span>${editing ? `<button class="relation-delete" data-relation-delete="${relation.id}" aria-label="删除关联">×</button>` : ''}</div>`;
+    }).join('') : '<span class="summary">尚未建立连接</span>'}</div>
+  </section>`;
+}
+
+function relationBuilderHtml(candidates, sourceEntity) {
+  if (!candidates.length) return '<p class="workflow-hint">知识库中还没有其他可连接的节点。</p>';
   const grouped = new Map();
   for (const candidate of candidates) {
-    const parts = String(candidate.category || '未分类').split('/').filter(Boolean);
-    const top = parts[0] || '未分类';
-    const sub = parts.slice(1).join('/') || '__direct__';
+    const parts = String(candidate.category || '').split('/').filter(Boolean);
+    const top = parts[0] || 'Library';
+    const sub = candidate.entity_type === 'folder' ? (parts.slice(1, -1).join('/') || '__folders__') : (parts.slice(1).join('/') || '__direct__');
     if (!grouped.has(top)) grouped.set(top, new Map());
     if (!grouped.get(top).has(sub)) grouped.get(top).set(sub, []);
     grouped.get(top).get(sub).push(candidate);
@@ -938,22 +1026,22 @@ function relationBuilderHtml(candidates) {
         <div class="relation-cascade-menu relation-level-two">
           ${[...subgroups.entries()].sort(([a], [b]) => a.localeCompare(b, 'zh-CN')).map(([sub, files]) => `
             <div class="relation-cascade-branch">
-              <button class="relation-cascade-option" type="button"><span>${sub === '__direct__' ? '本级资料' : escapeHtml(sub)}</span><span>‹</span></button>
+              <button class="relation-cascade-option" type="button"><span>${sub === '__direct__' ? '本级资料' : sub === '__folders__' ? '文件夹' : escapeHtml(sub)}</span><span>‹</span></button>
               <div class="relation-cascade-menu relation-level-three">
-                ${files.sort((a, b) => a.title.localeCompare(b.title, 'zh-CN')).map(file => `<button class="relation-file-option" type="button" data-relation-target="${escapeHtml(file.id)}" data-relation-title="${escapeHtml(file.title)}" title="${escapeHtml(file.title)}">${escapeHtml(file.title)}</button>`).join('')}
+                ${files.sort((a, b) => a.title.localeCompare(b.title, 'zh-CN')).map(file => `<button class="relation-file-option" type="button" data-relation-target="${escapeHtml(file.id)}" data-relation-kind="${file.entity_type}" data-relation-title="${escapeHtml(file.title)}" title="${escapeHtml(file.title)}"><small>${file.entity_type === 'folder' ? '文件夹' : file.entity_type === 'note' ? '笔记' : '资料'}</small>${file.entity_type === 'folder' ? '▱ ' : ''}${escapeHtml(file.title)}</button>`).join('')}
               </div>
             </div>`).join('')}
         </div>
       </div>`).join('');
   return `
     <div class="relation-cascade">
-      <button class="relation-cascade-trigger" type="button" data-relation-cascade-toggle aria-expanded="false"><span data-relation-selection>选择关联资料</span><span>⌄</span></button>
+      <button class="relation-cascade-trigger" type="button" data-relation-cascade-toggle aria-expanded="false"><span data-relation-selection>选择文件夹、资料或笔记</span><span>⌄</span></button>
       <div class="relation-cascade-popover" data-relation-cascade-popover hidden>
         <div class="relation-cascade-menu relation-level-one">${topMenus}</div>
       </div>
       <div class="relation-add" data-relation-confirm hidden>
-        <select id="relationType" aria-label="关联类型">${Object.entries(relationNames).map(([value, label]) => `<option value="${value}">${label}</option>`).join('')}</select>
-        <button class="secondary-action" type="button" data-relation-add>建立关联</button>
+        <select id="relationType" aria-label="连接类型">${Object.entries(relationNames).map(([value, label]) => `<option value="${value}" ${value === 'belongs_to' && sourceEntity.entity_type !== 'note' ? 'hidden disabled' : ''}>${label}</option>`).join('')}</select>
+        <button class="secondary-action" type="button" data-relation-add>建立连接</button>
       </div>
     </div>`;
 }
@@ -1015,6 +1103,46 @@ function closeFolderFilterMenu() {
   elements.folderFilterButton?.setAttribute('aria-expanded', 'false');
 }
 
+function renderFolderInspector(folder) {
+  const editing = state.editingFolderId === folder.id;
+  const entity = { ...folder, title: folder.name, category: folder.path, entity_type: 'folder' };
+  const pathLabel = folder.path ? `Library / ${folder.path}` : 'Library';
+  const body = editing ? `
+    <section class="inspector-section edit-panel">
+      <p class="inspector-label">编辑文件夹资料</p>
+      <label class="edit-label" for="editFolderSummary">简介</label>
+      <textarea class="edit-textarea" id="editFolderSummary" maxlength="20000" placeholder="说明这个文件夹收录的主题与范围">${escapeHtml(folder.summary || '')}</textarea>
+      <label class="edit-label" for="editFolderTags">标签</label>
+      <input class="edit-input" id="editFolderTags" value="${escapeHtml((folder.tags || []).join('，'))}" placeholder="使用逗号分隔">
+      <div class="edit-relation-block">
+        <p class="inspector-label">建立双向连接</p>
+        ${relationBuilderHtml(relationCandidatesFor(entity), entity)}
+      </div>
+      <p class="workflow-hint">文件夹名称与位置继续通过资料列表中的“移动”操作调整，稳定 ID 和已有连接不会改变。</p>
+      <div class="edit-actions">
+        <button class="secondary-action" type="button" data-cancel-folder-edit>取消</button>
+        <button class="primary-action" type="button" data-save-folder ${state.busyAction || state.backendCompatible === false ? 'disabled' : ''}>保存资料</button>
+      </div>
+    </section>` : `
+    <section class="inspector-section">
+      <p class="inspector-label">简介</p>
+      <p class="summary">${escapeHtml(folder.summary || '暂无简介')}</p>
+    </section>
+    <section class="inspector-section">
+      <p class="inspector-label">标签</p>
+      <div class="tag-list">${folder.tags?.length ? folder.tags.map(tag => `<span class="tag">${escapeHtml(tag)}</span>`).join('') : '<span class="summary">暂无标签</span>'}</div>
+    </section>`;
+  elements.inspector.innerHTML = `
+    <header class="inspector-head folder-inspector-head">
+      <div class="inspector-number"><span>FOLDER / ${escapeHtml(folder.id.slice(0, 8).toUpperCase())}</span><span class="status-pill">文件夹</span></div>
+      <h3>${escapeHtml(folder.name)}</h3>
+      <div class="inspector-subline"><span class="inspector-kind" title="${escapeHtml(pathLabel)}">${escapeHtml(pathLabel)}</span><span class="inspector-head-actions"><button class="edit-item-button" type="button" data-edit-folder ${state.backendCompatible === false ? 'disabled' : ''}>${editing ? '退出编辑' : '编辑资料'}</button></span></div>
+    </header>
+    ${body}
+    ${relationListHtml(entity, editing)}
+    <section class="inspector-section"><p class="inspector-label">稳定身份</p><p class="summary">文件夹改名或移动后，资料卡与双向连接会继续保留。</p></section>`;
+}
+
 async function performMove(destination) {
   const entity = state.moveEntity;
   if (!entity || state.busyAction) return;
@@ -1029,13 +1157,14 @@ async function performMove(destination) {
     }
     state.selectedId = entity.type === 'item' ? entity.id : null;
     await load({ quiet: true });
-    showToast(entity.type === 'item' ? '资料已移动' : '文件夹已移动，资料关联保持不变');
+    showToast(entity.type === 'item' ? '资料已移动' : '文件夹已移动，双向连接保持不变');
   } catch (error) { showToast(error.message); }
   finally { state.busyAction = false; }
 }
 
 function renderInspector() {
   const item = selectedItem();
+  const folder = selectedFolderRecord();
   elements.notesPanel.hidden = !state.readingMode;
   if (state.readingMode) {
     elements.inspectorEmpty.hidden = true;
@@ -1044,27 +1173,19 @@ function renderInspector() {
   }
   if (state.scope === 'inbox' && !item) {
     elements.inspectorEmpty.innerHTML = '<span class="inspector-index">IN</span><p>等待分类</p><small>文件只会暂存。点击左侧“执行收件箱分类”后才会调用分析模型并归档。</small>';
-  } else if (!item) {
+  } else if (!item && !folder) {
     elements.inspectorEmpty.innerHTML = '<span class="inspector-index">00</span><p>资料信息</p><small>选择资料后查看摘要、标签与日期</small>';
   }
-  elements.inspectorEmpty.hidden = Boolean(item);
-  elements.inspector.hidden = !item;
+  elements.inspectorEmpty.hidden = Boolean(item || folder);
+  elements.inspector.hidden = !item && !folder;
+  if (!item && folder) return renderFolderInspector(folder);
   if (!item) return;
   const source = item.source_url
     ? `<a class="source-link" href="${escapeHtml(item.source_url)}" target="_blank" rel="noreferrer">查看来源 ↗</a>`
     : escapeHtml(item.original_name || '本地文件');
   const editing = state.editingItemId === item.id;
-  const itemRelations = state.relations.filter(relation => relation.source_id === item.id || relation.target_id === item.id);
-  const relationCandidates = state.items.filter(value => value.id !== item.id);
-  const relationSection = `
-    <section class="inspector-section">
-      <p class="inspector-label">关联资料</p>
-      <div class="relation-list">${itemRelations.length ? itemRelations.map(relation => {
-        const otherId = relation.source_id === item.id ? relation.target_id : relation.source_id;
-        const other = state.items.find(value => value.id === otherId);
-        return `<div class="relation-row ${editing ? 'is-editing' : ''}"><span class="relation-type">${escapeHtml(relationNames[relation.type] || '相关')}</span><span class="relation-title" title="${escapeHtml(other?.title || '资料已删除')}">${escapeHtml(other?.title || '资料已删除')}</span>${editing ? `<button class="relation-delete" data-relation-delete="${relation.id}" aria-label="删除关联">×</button>` : ''}</div>`;
-      }).join('') : '<span class="summary">尚未建立关联</span>'}</div>
-    </section>`;
+  const itemEntity = { ...item, entity_type: item.kind === 'note' ? 'note' : 'item' };
+  const relationSection = relationListHtml(itemEntity, editing);
   const reviewWorkflow = item.status === 'review' ? `
     <section class="inspector-section review-workflow">
       <p class="inspector-label">人工复查</p>
@@ -1087,8 +1208,8 @@ function renderInspector() {
       <label class="edit-label" for="editTags">标签</label>
       <input class="edit-input" id="editTags" value="${escapeHtml((item.tags || []).join('，'))}" placeholder="使用逗号分隔，最多 8 个">
       <div class="edit-relation-block">
-        <p class="inspector-label">建立关联</p>
-        ${relationBuilderHtml(relationCandidates)}
+        <p class="inspector-label">建立双向连接</p>
+        ${relationBuilderHtml(relationCandidatesFor(itemEntity), itemEntity)}
       </div>
       <div class="edit-actions">
         <button class="secondary-action" type="button" data-cancel-edit>取消</button>
@@ -1163,7 +1284,7 @@ function updateNoteLines() {
   }
   const viewerRect = elements.viewer.getBoundingClientRect();
   const lines = [];
-  for (const note of [...state.notes, ...state.boundNotebookNotes.filter(value => value.anchor)]) {
+  for (const note of state.notes) {
     const position = noteAnchorPosition(note);
     const card = elements.notesTrack.querySelector(`[data-note-id="${note.id}"]`);
     const marker = elements.anchorMarkers.querySelector(`[data-marker-id="${note.id}"]`);
@@ -1184,7 +1305,7 @@ function layoutNotes() {
   if (!state.readingMode || !selectedItem()) return updateNoteLines();
   const trackHeight = Math.max(elements.viewer.scrollHeight + 80, elements.notesScroll.clientHeight);
   elements.notesTrack.style.height = `${trackHeight}px`;
-  const placements = [...state.notes, ...state.boundNotebookNotes.filter(value => value.anchor)].map(note => ({ note, position: noteAnchorPosition(note) })).filter(value => value.position).sort((a, b) => a.position.contentY - b.position.contentY);
+  const placements = state.notes.map(note => ({ note, position: noteAnchorPosition(note) })).filter(value => value.position).sort((a, b) => a.position.contentY - b.position.contentY);
   let nextTop = 14;
   for (const { note, position } of placements) {
     const card = elements.notesTrack.querySelector(`[data-note-id="${note.id}"]`);
@@ -1200,9 +1321,9 @@ function layoutNotes() {
 
 function renderNotes() {
   const item = selectedItem();
-  state.boundNotebookNotes = item ? state.items.filter(value => value.kind === 'note' && value.bound_item_id === item.id) : [];
-  const anchoredCards = [...state.notes, ...state.boundNotebookNotes.filter(note => note.anchor)];
-  elements.anchorMarkers.innerHTML = anchoredCards.map(note => `<span class="anchor-dot" data-marker-id="${note.id}" hidden></span>`).join('');
+  state.boundNotebookNotes = item ? state.items.filter(value => value.kind === 'note' && linkedMaterialId(value) === item.id) : [];
+  elements.anchorMarkers.innerHTML = state.notes.map(note => `<span class="anchor-dot" data-marker-id="${note.id}" hidden></span>`).join('');
+  renderLinkedNotebookPopover();
   if (!item) {
     elements.notesTrack.innerHTML = '<div class="notes-empty">选择资料后即可建立阅读便签。</div>';
     return layoutNotes();
@@ -1216,13 +1337,33 @@ function renderNotes() {
       <textarea data-note-content="${note.id}" placeholder="在这里记下想法…">${escapeHtml(note.content)}</textarea>
       <span class="note-saving" data-note-status="${note.id}">${note.content ? '已保存' : '空白便签'}</span>
     </article>`).join('');
-  const notebookHtml = state.boundNotebookNotes.filter(note => note.anchor).map(note => `
-    <article class="note-card notebook-note-card" data-note-id="${note.id}" data-open-notebook="${note.id}">
-      <div class="note-card-head"><button class="note-anchor-link" data-note-jump="${note.id}">${note.anchor.type === 'pdf' ? `PDF · 第 ${note.anchor.page} 页` : '正文锚点'}</button><span>笔记</span></div>
-      <h4>${escapeHtml(note.title)}</h4><p>${escapeHtml(note.summary || '点击打开笔记编辑')}</p>
-    </article>`).join('');
-  elements.notesTrack.innerHTML = stickyHtml || notebookHtml ? `${stickyHtml}${notebookHtml}` : '<div class="notes-empty">还没有笔记或便签。点击右上角按钮，再点击文章中的位置。</div>';
+  elements.notesTrack.innerHTML = stickyHtml || '<div class="notes-empty">还没有阅读便签。点击右上角“便签”，再点击正文中的位置。</div>';
   requestAnimationFrame(layoutNotes);
+}
+
+function renderLinkedNotebookPopover() {
+  const item = selectedItem();
+  const notes = item ? state.items.filter(value => value.kind === 'note' && linkedMaterialId(value) === item.id) : [];
+  state.boundNotebookNotes = notes;
+  elements.linkedNotebookCount.textContent = notes.length;
+  elements.newNotebookButton.setAttribute('aria-expanded', String(state.linkedNotebookOpen));
+  elements.linkedNotebookPopover.hidden = !state.linkedNotebookOpen;
+  if (!state.linkedNotebookOpen) return;
+  elements.linkedNotebookPopover.innerHTML = `
+    <header class="linked-notebook-head"><div><span>链接笔记</span><small>${notes.length} 篇与当前资料双向链接</small></div><button type="button" data-new-linked-notebook>＋ 添加笔记</button></header>
+    <div class="linked-notebook-list">${notes.length ? notes.map(note => `
+      <article class="linked-notebook-row">
+        <button type="button" data-preview-notebook="${note.id}" title="预览 ${escapeHtml(note.title)}"><strong>${escapeHtml(note.title)}</strong><small>${escapeHtml(note.summary || '点击查看笔记预览')}</small></button>
+        <button type="button" data-edit-notebook="${note.id}" aria-label="编辑 ${escapeHtml(note.title)}">编辑</button>
+      </article>`).join('') : '<p class="linked-notebook-empty">当前资料还没有链接笔记。</p>'}</div>`;
+}
+
+function setLinkedNotebookOpen(value) {
+  clearTimeout(state.linkedNotebookCloseTimer);
+  const next = Boolean(value && state.readingMode && selectedItem());
+  if (state.linkedNotebookOpen === next) return;
+  state.linkedNotebookOpen = next;
+  renderLinkedNotebookPopover();
 }
 
 function bookmarkLocation(bookmark) {
@@ -1357,7 +1498,7 @@ async function loadNotes() {
 }
 
 function setPinning(value) {
-  if (value) setNotebookPinning(false);
+  if (value) setLinkedNotebookOpen(false);
   state.pinning = Boolean(value && state.readingMode && selectedItem());
   elements.workspace.classList.toggle('is-pinning', state.pinning);
   elements.newNoteButton.classList.toggle('is-pinning', state.pinning);
@@ -1372,7 +1513,7 @@ function setReadingMode(value) {
   elements.readingToggle.setAttribute('aria-pressed', String(state.readingMode));
   elements.readingToggle.innerHTML = state.readingMode ? '<span>□</span> 退出阅读' : '<span>▣</span> 阅读模式';
   setPinning(false);
-  setNotebookPinning(false);
+  setLinkedNotebookOpen(false);
   if (!state.readingMode) {
     state.bookmarksOpen = false;
     state.bookmarkNaming = false;
@@ -1430,7 +1571,7 @@ function saveNote(noteId, content) {
 function showNoteNameDialog(options) {
   state.pendingNoteCreate = options;
   elements.noteNameInput.value = '';
-  elements.noteNameHelp.textContent = options.type === 'anchored' ? '笔记将绑定当前资料，并固定在刚才选择的位置。' : options.type === 'folder' ? `笔记将直接保存在 Library / ${options.category}。` : '笔记将先保存在临时笔记区，由你决定何时送入收件箱。';
+  elements.noteNameHelp.textContent = options.type === 'linked' ? '笔记将与当前资料建立双向链接，并保存在同一文件夹。' : options.type === 'folder' ? `笔记将直接保存在 Library / ${options.category}。` : '笔记将先保存在临时笔记区，由你决定何时送入收件箱。';
   elements.noteNameDialog.hidden = false;
   requestAnimationFrame(() => elements.noteNameInput.focus());
 }
@@ -1438,38 +1579,30 @@ function showNoteNameDialog(options) {
 function closeNoteNameDialog() {
   elements.noteNameDialog.hidden = true;
   state.pendingNoteCreate = null;
-  state.pendingNotebookAnchor = null;
 }
 
 async function createNamedNote(title) {
   const options = state.pendingNoteCreate;
   if (!options) return;
   const endpoint = options.type === 'temporary' ? '/api/notebook/temporary' : '/api/notebook/notes';
-  const payload = options.type === 'temporary' ? { title } : { title, category: options.category, bound_item_id: options.boundItemId, anchor: options.anchor };
+  const payload = options.type === 'temporary' ? { title } : { title, category: options.category, bound_item_id: options.boundItemId };
   const note = await api(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
   closeNoteNameDialog();
-  setNotebookPinning(false);
+  setLinkedNotebookOpen(false);
   if (options.type === 'temporary') state.temporaryNotes.unshift(note);
-  else state.items.unshift(note);
+  else {
+    state.items.unshift(note);
+    state.relations = await api('/api/relations');
+  }
   renderNavigation();
   renderList();
   if (state.readingMode) renderNotes();
-  await openNotebook(note.id);
-}
-
-function setNotebookPinning(value) {
-  state.notebookPinning = Boolean(value && state.readingMode && selectedItem());
-  elements.workspace.classList.toggle('is-pinning', state.notebookPinning || state.pinning);
-  elements.newNotebookButton.classList.toggle('is-pinning', state.notebookPinning);
-  elements.newNotebookButton.textContent = state.notebookPinning ? '取消锚定' : '＋ 笔记';
-  elements.pinHint.hidden = !(state.notebookPinning || state.pinning);
-  if (state.notebookPinning) elements.pinHint.textContent = '点击正文中想要锚定笔记的位置';
-  else if (state.pinning) elements.pinHint.textContent = '点击正文中想要锚定便签的位置';
+  await openNotebook(note.id, { mode: 'edit' });
 }
 
 function notebookEditorHtml(note, content, { close = true } = {}) {
   const temporary = note.state === 'temporary';
-  return `<header class="notebook-pane-head"><div><strong>${temporary ? '临时笔记' : note.bound_item_id ? '绑定笔记' : '知识笔记'}</strong><small>${temporary ? '自动保存于本地草稿区' : escapeHtml(note.category || '')}</small></div><div class="notebook-head-actions">
+  return `<header class="notebook-pane-head"><div><strong>${temporary ? '临时笔记' : linkedMaterialId(note) ? '链接笔记' : '知识笔记'}</strong><small>${temporary ? '自动保存于本地草稿区' : escapeHtml(note.category || '')}</small></div><div class="notebook-head-actions">
     ${temporary ? '<button type="button" data-notebook-submit>送入收件箱</button>' : `<a href="/api/notebook/notes/${note.id}/export/markdown">导出 MD 包</a><a href="/api/notebook/notes/${note.id}/export/pdf" target="_blank">导出 PDF</a>`}
     ${close ? '<button type="button" data-notebook-close>关闭</button>' : ''}
   </div></header><div class="notebook-editor-wrap">
@@ -1485,8 +1618,8 @@ function notebookEditorHtml(note, content, { close = true } = {}) {
   </div>`;
 }
 
-function notebookPreviewHtml(note, content, { close = false } = {}) {
-  return `<header class="notebook-pane-head"><div><strong>Markdown 预览</strong><small>图片随笔记保存在本地</small></div><div class="notebook-head-actions">${close ? '<button type="button" data-notebook-close>关闭</button>' : ''}</div></header><div class="notebook-preview"><article>${renderMarkdownHtml(content, { assetUrl: name => `/api/notebook/notes/${note.id}/assets/${encodeURIComponent(name)}` }) || '<p>开始书写后，这里会实时显示排版结果。</p>'}</article></div>`;
+function notebookPreviewHtml(note, content, { close = false, edit = false } = {}) {
+  return `<header class="notebook-pane-head"><div><strong>${escapeHtml(note.title || 'Markdown 预览')}</strong><small>${linkedMaterialId(note) ? '与原资料双向链接' : 'Markdown 预览 · 图片随笔记保存在本地'}</small></div><div class="notebook-head-actions">${edit ? '<button type="button" data-notebook-edit>编辑</button>' : ''}${close ? '<button type="button" data-notebook-close>关闭</button>' : ''}</div></header><div class="notebook-preview"><article>${renderMarkdownHtml(content, { assetUrl: name => `/api/notebook/notes/${note.id}/assets/${encodeURIComponent(name)}` }) || '<p>这篇笔记还没有正文。</p>'}</article></div>`;
 }
 
 function renderNotebookOutline(outline = []) {
@@ -1527,27 +1660,31 @@ async function renderNotebookWorkspace() {
   const active = state.activeNotebook;
   if (!active) { elements.notebookWorkspace.hidden = true; return; }
   elements.notebookWorkspace.hidden = false;
-  if (active.bound_item_id) {
-    const source = state.items.find(item => item.id === active.bound_item_id);
-    elements.notebookLeft.innerHTML = `<header class="notebook-pane-head"><div><strong>${escapeHtml(source?.title || '原资料')}</strong><small>${active.anchor?.type === 'pdf' ? `笔记锚点 · 第 ${active.anchor.page} 页` : '保留当前阅读位置'}</small></div><div class="notebook-head-actions"><button type="button" data-notebook-toggle-preview>预览笔记</button><button type="button" data-notebook-close>关闭</button></div></header><div class="notebook-source-host"></div><div class="notebook-preview notebook-source-preview" hidden><article>${renderMarkdownHtml(state.notebookContent, { assetUrl: name => `/api/notebook/notes/${active.id}/assets/${encodeURIComponent(name)}` }) || '<p>开始书写后，这里会显示排版结果。</p>'}</article></div>`;
+  if (linkedMaterialId(active)) {
+    const source = state.items.find(item => item.id === linkedMaterialId(active));
+    const editActions = state.notebookMode === 'edit' ? '<button type="button" data-notebook-toggle-preview>预览笔记</button>' : '';
+    elements.notebookLeft.innerHTML = `<header class="notebook-pane-head"><div><strong>${escapeHtml(source?.title || '原资料')}</strong><small>资料与笔记双向链接 · 保留当前阅读位置</small></div><div class="notebook-head-actions">${editActions}<button type="button" data-notebook-close>关闭</button></div></header><div class="notebook-source-host"></div><div class="notebook-preview notebook-source-preview" hidden><article>${renderMarkdownHtml(state.notebookContent, { assetUrl: name => `/api/notebook/notes/${active.id}/assets/${encodeURIComponent(name)}` }) || '<p>这篇笔记还没有正文。</p>'}</article></div>`;
     if (!state.notebookReaderPlaceholder) {
       state.notebookReaderPlaceholder = document.createComment('infobox-reader-position');
       elements.reader.before(state.notebookReaderPlaceholder);
     }
     elements.notebookLeft.querySelector('.notebook-source-host').append(elements.reader);
     elements.reader.classList.add('notebook-embedded-reader');
-    elements.notebookRight.innerHTML = notebookEditorHtml(active, state.notebookContent, { close: false });
+    elements.notebookRight.innerHTML = state.notebookMode === 'preview'
+      ? notebookPreviewHtml(active, state.notebookContent, { edit: true })
+      : notebookEditorHtml(active, state.notebookContent, { close: false });
     await restoreReadingPosition(source);
   } else {
     elements.notebookLeft.innerHTML = notebookEditorHtml(active, state.notebookContent);
     elements.notebookRight.innerHTML = notebookPreviewHtml(active, state.notebookContent);
   }
-  mountNotebookEditor();
+  if (state.notebookMode === 'edit') mountNotebookEditor();
+  else { state.notebookEditor?.destroy(); state.notebookEditor = null; }
   renderNotebookPreview();
 }
 
 async function toggleNotebookSourcePreview() {
-  if (!state.activeNotebook?.bound_item_id) return;
+  if (!linkedMaterialId(state.activeNotebook) || state.notebookMode !== 'edit') return;
   if (!state.notebookPreview) await saveReadingPosition({ immediate: true });
   state.notebookPreview = !state.notebookPreview;
   const source = elements.notebookLeft.querySelector('.notebook-source-host');
@@ -1563,16 +1700,25 @@ async function toggleNotebookSourcePreview() {
   if (!state.notebookPreview) await restoreReadingPosition(selectedItem());
 }
 
-async function openNotebook(id) {
+async function editActiveNotebook() {
+  if (!state.activeNotebook) return;
+  state.notebookMode = 'edit';
+  state.notebookPreview = false;
+  await renderNotebookWorkspace();
+  requestAnimationFrame(() => state.notebookEditor?.focus());
+}
+
+async function openNotebook(id, { mode = 'edit' } = {}) {
   try {
     const record = await api(`/api/notebook/notes/${id}`);
-    if (record.note.bound_item_id) {
-      const source = state.items.find(item => item.id === record.note.bound_item_id);
-      if (!source) throw new Error('绑定的原资料暂时不可用');
+    const materialId = linkedMaterialId(record.note);
+    if (materialId) {
+      const source = state.items.find(item => item.id === materialId);
+      if (!source) throw new Error('链接的原资料暂时不可用');
       if (selectedItem()?.id === source.id) await saveReadingPosition({ immediate: true });
       else {
         state.selectedId = source.id;
-        state.tab = source.reading_position?.view || record.note.anchor?.view || 'asset';
+        state.tab = source.reading_position?.view || 'asset';
         state.graphMode = false;
         setGraphMode(false);
         renderList();
@@ -1582,19 +1728,20 @@ async function openNotebook(id) {
     }
     state.activeNotebook = record.note;
     state.notebookContent = record.content || '';
+    state.notebookMode = mode === 'preview' ? 'preview' : 'edit';
     state.notebookPreview = false;
     await renderNotebookWorkspace();
-    requestAnimationFrame(() => state.notebookEditor?.focus());
+    if (state.notebookMode === 'edit') requestAnimationFrame(() => state.notebookEditor?.focus());
   } catch (error) { showToast(error.message); }
 }
 
 async function closeNotebook() {
   clearTimeout(state.notebookSaveTimer);
-  if (state.activeNotebook) {
+  if (state.activeNotebook && state.notebookMode === 'edit') {
     try { await persistActiveNotebook(); }
     catch (error) { showToast(error.message); return; }
   }
-  if (state.activeNotebook?.bound_item_id) await saveReadingPosition({ immediate: true }).catch(error => showToast(error.message));
+  if (linkedMaterialId(state.activeNotebook)) await saveReadingPosition({ immediate: true }).catch(error => showToast(error.message));
   if (state.notebookReaderPlaceholder?.isConnected) state.notebookReaderPlaceholder.replaceWith(elements.reader);
   elements.reader.classList.remove('notebook-embedded-reader');
   await restoreReadingPosition(selectedItem());
@@ -1603,6 +1750,7 @@ async function closeNotebook() {
   state.notebookEditor = null;
   state.activeNotebook = null;
   state.notebookContent = '';
+  state.notebookMode = 'edit';
   state.notebookPreview = false;
   elements.notebookWorkspace.hidden = true;
   renderNavigation();
@@ -1613,7 +1761,7 @@ async function closeNotebook() {
 }
 
 async function persistActiveNotebook() {
-  if (!state.activeNotebook) return;
+  if (!state.activeNotebook || state.notebookMode !== 'edit') return;
   const noteId = state.activeNotebook.id;
   const save = async () => {
     if (state.activeNotebook?.id !== noteId) return;
@@ -1692,6 +1840,7 @@ async function convertSticky(noteId) {
     const note = await api(`/api/items/${item.id}/notes/${noteId}/convert`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ title }) });
     state.notes = state.notes.filter(value => value.id !== noteId);
     state.items.unshift(note);
+    state.relations = await api('/api/relations');
     renderNotes();
     await openNotebook(note.id);
   } catch (error) { showToast(error.message); }
@@ -1800,24 +1949,43 @@ async function patchOrganization(changes, message = '') {
 }
 
 async function addRelation() {
-  const item = selectedItem();
+  const entity = selectedItem() || selectedFolderRecord();
   const targetId = elements.inspector.querySelector('[data-relation-confirm]')?.dataset.relationSelected;
   const type = elements.inspector.querySelector('#relationType')?.value;
-  if (!item || !targetId) return showToast('请选择要关联的资料');
+  if (!entity || !targetId) return showToast('请选择要连接的节点');
   try {
-    const relation = await api('/api/relations', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source_id: item.id, target_id: targetId, type }) });
-    if (!state.relations.some(value => value.id === relation.id)) state.relations.push(relation);
-    renderInspector(); if (state.graphMode) renderGraph();
-    showToast('资料关联已建立');
+    await api('/api/relations', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source_id: entity.id, target_id: targetId, type }) });
+    await load({ quiet: true });
+    if (state.readingMode) renderNotes();
+    showToast(type === 'belongs_to' ? '笔记所属关系已建立' : '双向连接已建立');
   } catch (error) { showToast(error.message); }
 }
 
 async function deleteRelation(id) {
   try {
     await api(`/api/relations/${id}`, { method: 'DELETE' });
-    state.relations = state.relations.filter(relation => relation.id !== id);
-    renderInspector(); if (state.graphMode) renderGraph();
+    await load({ quiet: true });
+    if (state.readingMode) renderNotes();
   } catch (error) { showToast(error.message); }
+}
+
+async function saveFolderEdits() {
+  const folder = selectedFolderRecord();
+  if (!folder || state.busyAction) return;
+  const summary = elements.inspector.querySelector('#editFolderSummary')?.value || '';
+  const tags = (elements.inspector.querySelector('#editFolderTags')?.value || '').split(/[,，、\n]/).map(tag => tag.trim()).filter(Boolean);
+  state.busyAction = true;
+  try {
+    const updated = await api(`/api/library/folder-records/${folder.id}`, {
+      method: 'PATCH', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ summary, tags }),
+    });
+    Object.assign(folder, updated);
+    state.editingFolderId = null;
+    renderInspector();
+    if (state.graphMode) renderGraph();
+    showToast('文件夹资料已保存');
+  } catch (error) { showToast(error.message); }
+  finally { state.busyAction = false; }
 }
 
 async function saveItemEdits() {
@@ -1853,6 +2021,7 @@ async function createFolder(parent = state.creatingFolderParent || '') {
     await load({ quiet: true });
     state.scope = 'category';
     state.category = folder.path;
+    state.selectedFolderId = folder.id || folderRecordByPath(folder.path)?.id || null;
     setGraphMode(false);
     render();
     pushNavigation();
@@ -1932,24 +2101,69 @@ async function importUrlsToInbox() {
   }
 }
 
-async function deleteLibraryItem() {
-  const item = selectedItem();
+async function deleteLibraryItemById(itemId) {
+  const item = state.items.find(value => value.id === itemId);
   if (!item || state.busyAction) return;
-  const message = item.kind === 'note' ? `确定永久删除笔记“${item.title}”吗？` : `确定永久删除“${item.title}”吗？原件和阅读记录会被删除，绑定笔记会解除绑定并送入收件箱。`;
+  const message = item.kind === 'note'
+    ? `确定将笔记“${item.title}”移入回收站吗？`
+    : `确定将“${item.title}”移入回收站吗？原件和阅读记录会一并移入；绑定笔记会解除绑定并送入收件箱。`;
   if (!window.confirm(message)) return;
   state.busyAction = true;
-  renderInspector();
+  if (state.selectedId === item.id) renderInspector();
   try {
     await api(`/api/items/${item.id}`, { method: 'DELETE' });
     state.editingItemId = null;
-    state.selectedId = null;
+    if (state.selectedId === item.id) state.selectedId = null;
     await load({ quiet: true });
-    showToast('资料已删除');
+    showToast('已移入回收站');
   } catch (error) {
     showToast(error.message);
   } finally {
     state.busyAction = false;
     renderInspector();
+  }
+}
+
+async function deleteLibraryItem() {
+  const item = selectedItem();
+  if (item) await deleteLibraryItemById(item.id);
+}
+
+async function deleteTemporaryNote(noteId) {
+  const note = state.temporaryNotes.find(value => value.id === noteId);
+  if (!note || state.busyAction) return;
+  if (!window.confirm(`确定将临时笔记“${note.title}”移入回收站吗？`)) return;
+  state.busyAction = true;
+  try {
+    await api(`/api/notebook/notes/${note.id}`, { method: 'DELETE' });
+    await load({ quiet: true });
+    showToast('临时笔记已移入回收站');
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    state.busyAction = false;
+  }
+}
+
+async function deleteLibraryFolder(path) {
+  const folder = findFolderNode(path);
+  if (!folder || state.busyAction) return;
+  const details = [folder.count ? `${folder.count} 项资料` : '', folder.children?.length ? `${folder.children.length} 个直接子文件夹` : ''].filter(Boolean).join('、');
+  const message = `确定将文件夹“${folder.name}”${details ? `及其中的${details}` : ''}移入回收站吗？`;
+  if (!window.confirm(message)) return;
+  state.busyAction = true;
+  try {
+    await api(`/api/library/folders?path=${encodeURIComponent(path)}`, { method: 'DELETE' });
+    for (const collapsed of [...state.collapsedFolders]) {
+      if (collapsed === path || collapsed.startsWith(`${path}/`)) state.collapsedFolders.delete(collapsed);
+    }
+    state.selectedId = null;
+    await load({ quiet: true });
+    showToast('文件夹已移入回收站');
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    state.busyAction = false;
   }
 }
 
@@ -2027,11 +2241,12 @@ async function processInbox() {
 
 async function load({ quiet = false } = {}) {
   try {
-    const [healthResult, itemsResult, treeResult, inboxResult, viewsResult, relationsResult, historyResult, temporaryNotesResult] = await Promise.allSettled([api('/health'), api('/api/items'), api('/api/library/tree'), api('/api/inbox'), api('/api/views'), api('/api/relations'), api('/api/restructure/history'), api('/api/notebook/temporary')]);
+    const [healthResult, itemsResult, treeResult, folderRecordsResult, inboxResult, viewsResult, relationsResult, historyResult, temporaryNotesResult] = await Promise.allSettled([api('/health'), api('/api/items'), api('/api/library/tree'), api('/api/library/folder-records'), api('/api/inbox'), api('/api/views'), api('/api/relations'), api('/api/restructure/history'), api('/api/notebook/temporary')]);
     if (itemsResult.status === 'rejected') throw itemsResult.reason;
     if (treeResult.status === 'rejected') throw treeResult.reason;
     state.items = itemsResult.value;
     state.tree = treeResult.value;
+    state.folderRecords = folderRecordsResult.status === 'fulfilled' ? folderRecordsResult.value : [];
     initializeCollapsedFolders();
     state.backendCompatible = healthResult.status === 'fulfilled' && Number(healthResult.value.api_version) >= 13;
     state.inboxAvailable = state.backendCompatible && inboxResult.status === 'fulfilled';
@@ -2115,6 +2330,24 @@ document.addEventListener('click', async event => {
     renderNavigation();
     return;
   }
+  const deleteTemporary = event.target.closest('[data-delete-temporary-note]');
+  if (deleteTemporary) {
+    event.stopPropagation();
+    await deleteTemporaryNote(deleteTemporary.dataset.deleteTemporaryNote);
+    return;
+  }
+  const deleteListItem = event.target.closest('[data-delete-list-item]');
+  if (deleteListItem) {
+    event.stopPropagation();
+    await deleteLibraryItemById(deleteListItem.dataset.deleteListItem);
+    return;
+  }
+  const deleteListFolder = event.target.closest('[data-delete-list-folder]');
+  if (deleteListFolder) {
+    event.stopPropagation();
+    await deleteLibraryFolder(deleteListFolder.dataset.deleteListFolder);
+    return;
+  }
   const moveItem = event.target.closest('[data-move-item]');
   if (moveItem) {
     event.stopPropagation();
@@ -2154,6 +2387,7 @@ document.addEventListener('click', async event => {
     state.scope = 'category';
     state.category = openFolder.dataset.openFolder;
     state.selectedId = null;
+    state.selectedFolderId = folderRecordByPath(state.category)?.id || null;
     state.editingItemId = null;
     setGraphMode(false);
     render();
@@ -2183,9 +2417,23 @@ document.addEventListener('click', async event => {
     const cascade = relationTarget.closest('.relation-cascade');
     const selection = cascade?.querySelector('[data-relation-selection]');
     const confirm = cascade?.querySelector('[data-relation-confirm]');
+    const typeSelect = cascade?.querySelector('#relationType');
     const popover = cascade?.querySelector('[data-relation-cascade-popover]');
     if (selection) { selection.textContent = relationTarget.dataset.relationTitle; selection.title = relationTarget.dataset.relationTitle; }
-    if (confirm) { confirm.dataset.relationSelected = relationTarget.dataset.relationTarget; confirm.hidden = false; }
+    if (confirm) {
+      confirm.dataset.relationSelected = relationTarget.dataset.relationTarget;
+      confirm.dataset.relationTargetKind = relationTarget.dataset.relationKind;
+      confirm.hidden = false;
+    }
+    if (typeSelect) {
+      const source = selectedItem() || selectedFolderRecord();
+      const sourceKind = source?.kind === 'note' ? 'note' : source?.path != null ? 'folder' : 'item';
+      const targetKind = relationTarget.dataset.relationKind;
+      const allowBelongs = (sourceKind === 'note' && targetKind === 'item') || (sourceKind === 'item' && targetKind === 'note');
+      const option = typeSelect.querySelector('option[value="belongs_to"]');
+      if (option) { option.hidden = !allowBelongs; option.disabled = !allowBelongs; }
+      if (!allowBelongs && typeSelect.value === 'belongs_to') typeSelect.value = 'related';
+    }
     if (popover) popover.hidden = true;
     cascade?.querySelector('[data-relation-cascade-toggle]')?.setAttribute('aria-expanded', 'false');
     return;
@@ -2219,6 +2467,21 @@ document.addEventListener('click', async event => {
   if (event.target.closest('[data-edit-item]')) {
     state.editingItemId = state.editingItemId === state.selectedId ? null : state.selectedId;
     renderInspector();
+    return;
+  }
+  if (event.target.closest('[data-edit-folder]')) {
+    const folder = selectedFolderRecord();
+    if (folder) state.editingFolderId = state.editingFolderId === folder.id ? null : folder.id;
+    renderInspector();
+    return;
+  }
+  if (event.target.closest('[data-cancel-folder-edit]')) {
+    state.editingFolderId = null;
+    renderInspector();
+    return;
+  }
+  if (event.target.closest('[data-save-folder]')) {
+    saveFolderEdits();
     return;
   }
   if (event.target.closest('[data-cancel-edit]')) {
@@ -2273,6 +2536,7 @@ document.addEventListener('click', async event => {
     state.scope = nav.dataset.scope;
     state.category = '';
     state.selectedId = null;
+    state.selectedFolderId = null;
     state.editingItemId = null;
     setGraphMode(false);
     render();
@@ -2285,6 +2549,7 @@ document.addEventListener('click', async event => {
     state.scope = 'category';
     state.category = category.dataset.category;
     state.selectedId = null;
+    state.selectedFolderId = folderRecordByPath(state.category)?.id || null;
     state.editingItemId = null;
     setGraphMode(false);
     render();
@@ -2297,6 +2562,7 @@ document.addEventListener('click', async event => {
     if (chosen?.kind === 'note') { openNotebook(chosen.id); return; }
     await saveReadingPosition({ immediate: true }).catch(() => {});
     state.selectedId = row.dataset.id;
+    state.selectedFolderId = null;
     state.tab = chosen?.reading_position?.view || 'asset';
     state.notes = [];
     state.notesItemId = null;
@@ -2330,7 +2596,7 @@ document.addEventListener('click', async event => {
   }
   const noteJump = event.target.closest('[data-note-jump]');
   if (noteJump) {
-    const note = [...state.notes, ...state.boundNotebookNotes].find(value => value.id === noteJump.dataset.noteJump);
+    const note = state.notes.find(value => value.id === noteJump.dataset.noteJump);
     if (note) jumpToNote(note);
     return;
   }
@@ -2374,7 +2640,7 @@ elements.noteNameForm.addEventListener('submit', event => {
   if (title) createNamedNote(title).catch(error => showToast(error.message));
 });
 elements.noteNameDialog.addEventListener('click', event => {
-  if (event.target === elements.noteNameDialog || event.target.closest('[data-note-name-cancel]')) { closeNoteNameDialog(); setNotebookPinning(false); }
+  if (event.target === elements.noteNameDialog || event.target.closest('[data-note-name-cancel]')) { closeNoteNameDialog(); setLinkedNotebookOpen(false); }
 });
 elements.notebookWorkspace.addEventListener('input', event => {
   if (event.target.matches('[data-notebook-title]')) scheduleNotebookSave();
@@ -2382,6 +2648,7 @@ elements.notebookWorkspace.addEventListener('input', event => {
 elements.notebookWorkspace.addEventListener('click', async event => {
   if (event.target.closest('[data-notebook-close]')) return closeNotebook();
   if (event.target.closest('[data-notebook-submit]')) return submitActiveNotebook();
+  if (event.target.closest('[data-notebook-edit]')) return editActiveNotebook();
   const command = event.target.closest('[data-editor-command]')?.dataset.editorCommand;
   if (command) { state.notebookEditor?.run(command); return; }
   const outlineOffset = event.target.closest('[data-outline-offset]')?.dataset.outlineOffset;
@@ -2404,7 +2671,8 @@ elements.notebookWorkspace.addEventListener('click', async event => {
 document.addEventListener('keydown', event => {
   if (event.key !== 'Escape') return;
   if (!elements.urlImportDialog.hidden) closeUrlImportDialog();
-  if (!elements.noteNameDialog.hidden) { closeNoteNameDialog(); setNotebookPinning(false); }
+  if (!elements.noteNameDialog.hidden) { closeNoteNameDialog(); setLinkedNotebookOpen(false); }
+  if (state.linkedNotebookOpen) setLinkedNotebookOpen(false);
   if (state.bookmarksOpen) {
     state.bookmarksOpen = false;
     state.bookmarkNaming = false;
@@ -2429,8 +2697,48 @@ for (const eventName of ['dragleave', 'drop']) {
 elements.readingToggle.addEventListener('click', () => setReadingMode(!state.readingMode));
 elements.newNoteButton.addEventListener('click', () => setPinning(!state.pinning));
 elements.newNotebookButton.addEventListener('click', () => {
-  if (!state.notebookPinning) setPinning(false);
-  setNotebookPinning(!state.notebookPinning);
+  setPinning(false);
+  setLinkedNotebookOpen(true);
+});
+elements.linkedNotebookMenu.addEventListener('mouseenter', () => setLinkedNotebookOpen(true));
+elements.linkedNotebookMenu.addEventListener('mouseleave', () => {
+  clearTimeout(state.linkedNotebookCloseTimer);
+  state.linkedNotebookCloseTimer = setTimeout(() => {
+    if (elements.linkedNotebookMenu.matches(':hover') || elements.linkedNotebookMenu.contains(document.activeElement)) return;
+    setLinkedNotebookOpen(false);
+  }, 240);
+});
+elements.linkedNotebookMenu.addEventListener('focusin', () => setLinkedNotebookOpen(true));
+elements.linkedNotebookMenu.addEventListener('focusout', () => {
+  clearTimeout(state.linkedNotebookCloseTimer);
+  state.linkedNotebookCloseTimer = setTimeout(() => {
+    if (elements.linkedNotebookMenu.matches(':hover') || elements.linkedNotebookMenu.contains(document.activeElement)) return;
+    setLinkedNotebookOpen(false);
+  }, 240);
+});
+elements.linkedNotebookPopover.addEventListener('click', async event => {
+  event.stopPropagation();
+  if (event.target.closest('[data-new-linked-notebook]')) {
+    const item = selectedItem();
+    if (item) {
+      setLinkedNotebookOpen(false);
+      showNoteNameDialog({ type: 'linked', boundItemId: item.id, category: item.category });
+    }
+    return;
+  }
+  const previewNotebook = event.target.closest('[data-preview-notebook]');
+  if (previewNotebook) {
+    const id = previewNotebook.dataset.previewNotebook;
+    setLinkedNotebookOpen(false);
+    await openNotebook(id, { mode: 'preview' });
+    return;
+  }
+  const editNotebook = event.target.closest('[data-edit-notebook]');
+  if (editNotebook) {
+    const id = editNotebook.dataset.editNotebook;
+    setLinkedNotebookOpen(false);
+    await openNotebook(id, { mode: 'edit' });
+  }
 });
 elements.bookmarkButton.addEventListener('click', event => {
   event.stopPropagation();
@@ -2491,6 +2799,7 @@ elements.bookmarkPopover.addEventListener('submit', async event => {
 });
 
 document.addEventListener('click', event => {
+  if (state.linkedNotebookOpen && !event.target.closest('#linkedNotebookMenu')) setLinkedNotebookOpen(false);
   if (!state.bookmarksOpen || event.target.closest('#bookmarkButton, #bookmarkPopover')) return;
   state.bookmarksOpen = false;
   state.bookmarkNaming = false;
@@ -2499,7 +2808,7 @@ document.addEventListener('click', event => {
 });
 
 elements.viewer.addEventListener('click', async event => {
-  if (!state.pinning && !state.notebookPinning) return;
+  if (!state.pinning) return;
   const item = selectedItem();
   if (!item) return setPinning(false);
   const sheet = event.target.closest('.pdf-sheet');
@@ -2513,11 +2822,6 @@ elements.viewer.addEventListener('click', async event => {
     anchor = { type: 'document', x: Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width)), y: Math.max(0, Math.min(1, (event.clientY - rect.top + elements.viewer.scrollTop) / elements.viewer.scrollHeight)) };
   }
   if (!anchor) return showToast('请点击 PDF 页面或文章正文');
-  if (state.notebookPinning) {
-    state.pendingNotebookAnchor = { ...anchor, view: state.tab };
-    showNoteNameDialog({ type: 'anchored', boundItemId: item.id, category: item.category, anchor: state.pendingNotebookAnchor });
-    return;
-  }
   try {
     const note = await api(`/api/items/${item.id}/notes`, {
       method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ anchor }),
@@ -2595,7 +2899,8 @@ document.querySelector('#rollbackClose').addEventListener('click', () => toggleR
 elements.tree.addEventListener('keydown', event => { if (event.key === 'Enter' && event.target.matches('[data-folder-name]')) createFolder(); });
 elements.list.addEventListener('keydown', event => {
   if (event.key !== 'Enter' && event.key !== ' ') return;
-  const row = event.target.closest('[data-open-folder], [data-id]');
+  if (event.target.closest('button, input, select, textarea, a')) return;
+  const row = event.target.closest('[data-open-folder], [data-id], [data-open-notebook]');
   if (!row) return;
   event.preventDefault();
   row.click();
@@ -2633,12 +2938,13 @@ elements.graphCanvas.addEventListener('click', event => {
   const folder = event.target.closest('[data-graph-category]');
   if (folder) {
     clearTimeout(graphClickTimer);
-    graphClickTimer = setTimeout(() => focusGraphNode(folder.dataset.graphNode), graphClickDelay);
+    graphClickTimer = setTimeout(() => focusGraphNode(folder.dataset.graphNode, null, folder.dataset.graphFolderId || null), graphClickDelay);
     return;
   }
   if (event.target.closest('[data-graph-root]')) {
     clearTimeout(graphClickTimer);
-    graphClickTimer = setTimeout(() => focusGraphNode('root'), graphClickDelay);
+    const root = event.target.closest('[data-graph-root]');
+    graphClickTimer = setTimeout(() => focusGraphNode('root', null, root.dataset.graphFolderId || null), graphClickDelay);
   }
 });
 elements.graphCanvas.addEventListener('dblclick', event => {

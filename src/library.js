@@ -33,7 +33,8 @@ export const SUPPORTED_INBOX_EXTENSIONS = new Set([
   '.mp3', '.m4a', '.aac', '.wav', '.flac', '.ogg', '.opus', '.wma', '.zip',
 ]);
 const READING_STATUSES = new Set(['unread', 'reading', 'read']);
-const RELATION_TYPES = new Set(['related', 'cites', 'supports', 'contradicts', 'follow_up']);
+const RELATION_TYPES = new Set(['belongs_to', 'related', 'cites', 'supports', 'contradicts', 'follow_up']);
+const uniqueIds = values => [...new Set((Array.isArray(values) ? values : []).map(value => String(value || '').trim()).filter(Boolean))];
 
 function vaultRecordToItem(record) {
   const metadata = record.metadata || {};
@@ -55,6 +56,8 @@ function vaultRecordToItem(record) {
     summary_basis: metadata.summary_basis || 'user_note',
     bound_item_id: metadata.bound_item_id || null,
     anchor: metadata.anchor || null,
+    linked_item_ids: uniqueIds(metadata.linked_item_ids || (metadata.bound_item_id ? [metadata.bound_item_id] : [])),
+    linked_note_ids: uniqueIds(metadata.linked_note_ids),
     favorite: Boolean(metadata.favorite),
     reading_status: READING_STATUSES.has(metadata.reading_status) ? metadata.reading_status : 'unread',
     last_opened_at: metadata.last_opened_at || null,
@@ -126,6 +129,7 @@ export class Library {
     this.savedViewsFile = join(this.root, 'data', 'saved-views.json');
     this.relationsFile = join(this.root, 'data', 'relations.json');
     this.foldersFile = join(this.root, 'data', 'folders.json');
+    this.folderMetadataFile = join(this.root, 'data', 'folder-metadata.json');
     this.restructureHistoryFile = join(this.root, 'data', 'restructure-history.json');
     this.vaultMigrationsDirectory = join(this.root, 'data', 'vault-migrations');
     this.vault = new VaultRepository({ root: options.vaultRoot || process.env.VAULT_DIR || join(this.root, 'vault') });
@@ -192,6 +196,8 @@ export class Library {
       const item = await readJsonFile(path);
       return {
         ...item,
+        linked_item_ids: uniqueIds(item.linked_item_ids || (item.bound_item_id ? [item.bound_item_id] : [])),
+        linked_note_ids: uniqueIds(item.linked_note_ids),
         favorite: Boolean(item.favorite),
         reading_status: READING_STATUSES.has(item.reading_status) ? item.reading_status : 'unread',
         last_opened_at: item.last_opened_at || null,
@@ -269,36 +275,139 @@ export class Library {
     });
   }
 
-  async relations() { return readJsonArray(this.relationsFile); }
+  async relations() {
+    const relations = await readJsonArray(this.relationsFile);
+    const items = await this.items();
+    const itemIds = new Set(items.map(item => item.id));
+    let changed = false;
+    for (const note of items.filter(item => item.kind === 'note')) {
+      const materialId = uniqueIds(note.linked_item_ids || (note.bound_item_id ? [note.bound_item_id] : []))[0];
+      if (!materialId || !itemIds.has(materialId)) continue;
+      const exists = relations.some(relation => relation.type === 'belongs_to' && ((relation.source_id === note.id && relation.target_id === materialId) || (relation.source_id === materialId && relation.target_id === note.id)));
+      if (exists) continue;
+      relations.push({ id: randomUUID(), source_id: note.id, target_id: materialId, type: 'belongs_to', created_at: note.created_at || new Date().toISOString() });
+      changed = true;
+    }
+    if (changed) await writeJsonFile(this.relationsFile, relations);
+    return relations;
+  }
+
+  async relationEntities() {
+    const [items, folders] = await Promise.all([this.items(), this.folderRecords()]);
+    return new Map([
+      ...items.map(item => [item.id, { ...item, entity_type: item.kind === 'note' ? 'note' : 'item' }]),
+      ...folders.map(folder => [folder.id, { ...folder, entity_type: 'folder', title: folder.name, category: folder.path }]),
+    ]);
+  }
 
   async addRelation(payload) {
-    const sourceId = String(payload?.source_id || '');
-    const targetId = String(payload?.target_id || '');
+    let sourceId = String(payload?.source_id || '');
+    let targetId = String(payload?.target_id || '');
     const type = RELATION_TYPES.has(payload?.type) ? payload.type : 'related';
-    if (!sourceId || !targetId || sourceId === targetId) throw new Error('Relation requires two different items');
-    const ids = new Set((await this.items()).map(item => item.id));
-    if (!ids.has(sourceId) || !ids.has(targetId)) throw new Error('Related item not found');
-    return updateJsonArray(this.relationsFile, relations => {
+    if (!sourceId || !targetId || sourceId === targetId) throw new Error('Relation requires two different entities');
+    const entities = await this.relationEntities();
+    if (!entities.has(sourceId) || !entities.has(targetId)) throw new Error('Related entity not found');
+    let note = null;
+    let material = null;
+    if (type === 'belongs_to') {
+      const endpoints = [entities.get(sourceId), entities.get(targetId)];
+      note = endpoints.find(entity => entity.entity_type === 'note');
+      material = endpoints.find(entity => entity.entity_type === 'item');
+      if (!note || !material) throw new Error('Belongs-to relations require one note and one material');
+      sourceId = note.id;
+      targetId = material.id;
+    }
+    let previousOwnership = null;
+    const relation = await updateJsonArray(this.relationsFile, relations => {
       const duplicate = relations.find(relation => ((relation.source_id === sourceId && relation.target_id === targetId) || (relation.source_id === targetId && relation.target_id === sourceId)) && relation.type === type);
       if (duplicate) return duplicate;
+      if (type === 'belongs_to') {
+        const previous = relations.findIndex(relation => relation.type === 'belongs_to' && (relation.source_id === note.id || relation.target_id === note.id));
+        if (previous >= 0) previousOwnership = relations.splice(previous, 1)[0];
+      }
       const relation = { id: randomUUID(), source_id: sourceId, target_id: targetId, type, created_at: new Date().toISOString() };
       relations.push(relation);
       return relation;
     });
+    if (type === 'belongs_to') {
+      if (previousOwnership) {
+        const previousMaterialId = previousOwnership.source_id === note.id ? previousOwnership.target_id : previousOwnership.source_id;
+        const previousMaterial = entities.get(previousMaterialId);
+        if (previousMaterial?.entity_type === 'item' && previousMaterial.id !== material.id) {
+          await this.setMaterialLinkedNotes(previousMaterial, uniqueIds(previousMaterial.linked_note_ids).filter(id => id !== note.id));
+        }
+      }
+      await this.setNoteOwnership(note, material);
+    }
+    return relation;
   }
 
   async deleteRelation(id) {
-    return updateJsonArray(this.relationsFile, relations => {
+    const removed = await updateJsonArray(this.relationsFile, relations => {
       const index = relations.findIndex(relation => relation.id === id);
       if (index < 0) return null;
       return relations.splice(index, 1)[0];
     });
+    if (removed?.type === 'belongs_to') await this.clearNoteOwnership(removed);
+    return removed;
   }
 
   async folders() {
     return (await readJsonArray(this.foldersFile))
       .map(value => String(value || '').split('/').map(safePart).filter(Boolean).join('/'))
       .filter(Boolean);
+  }
+
+  async folderRecords() {
+    const categories = ['', ...await this.categories()];
+    const stored = await readJsonArray(this.folderMetadataFile);
+    const records = stored.filter(record => record && typeof record === 'object' && typeof record.id === 'string' && typeof record.path === 'string');
+    const byPath = new Map(records.map(record => [record.path, record]));
+    let changed = records.length !== stored.length;
+    for (const path of categories) {
+      if (byPath.has(path)) continue;
+      const now = new Date().toISOString();
+      const record = { id: randomUUID(), path, name: path ? path.split('/').at(-1) : 'Library', summary: '', tags: [], created_at: now, updated_at: now };
+      records.push(record);
+      byPath.set(path, record);
+      changed = true;
+    }
+    if (changed) await writeJsonFile(this.folderMetadataFile, records);
+    return categories.map(path => {
+      const record = byPath.get(path);
+      return { ...record, name: path ? path.split('/').at(-1) : 'Library', summary: String(record.summary || ''), tags: Array.isArray(record.tags) ? record.tags : [] };
+    });
+  }
+
+  async updateFolderMetadata(id, payload = {}) {
+    const active = (await this.folderRecords()).find(folder => folder.id === id);
+    if (!active) return null;
+    const summary = String(payload.summary || '').slice(0, 20000);
+    const tags = [...new Set((Array.isArray(payload.tags) ? payload.tags : []).map(value => String(value || '').trim()).filter(Boolean))].slice(0, 20);
+    let updated = null;
+    await updateJsonArray(this.folderMetadataFile, records => {
+      const record = records.find(value => value.id === id);
+      if (!record) return null;
+      record.summary = summary;
+      record.tags = tags;
+      record.updated_at = new Date().toISOString();
+      updated = { ...record, name: record.path ? record.path.split('/').at(-1) : 'Library' };
+      return updated;
+    });
+    return updated;
+  }
+
+  async remapFolderRecords(mapping) {
+    const changes = [...mapping].sort((a, b) => b.from.length - a.from.length);
+    await updateJsonArray(this.folderMetadataFile, records => {
+      for (const record of records) {
+        const change = changes.find(value => record.path === value.from || record.path.startsWith(`${value.from}/`));
+        if (!change) continue;
+        record.path = `${change.to}${record.path.slice(change.from.length)}`;
+        record.name = record.path.split('/').at(-1);
+        record.updated_at = new Date().toISOString();
+      }
+    });
   }
 
   async categories() {
@@ -331,7 +440,7 @@ export class Library {
     folders.sort((a, b) => a.localeCompare(b, 'zh-CN'));
     await mkdir(join(this.library, ...path.split('/')), { recursive: true });
     await writeJsonFile(this.foldersFile, folders);
-    return { name, parent, path };
+    return (await this.folderRecords()).find(folder => folder.path === path);
   }
 
   async deleteFolder(value) {
@@ -344,8 +453,9 @@ export class Library {
     const folders = await this.folders();
     const removedFolders = folders.filter(folder => folder === path || folder.startsWith(`${path}/`));
     const itemIds = new Set(items.map(item => item.id));
+    const folderIds = new Set((await this.folderRecords()).filter(folder => folder.path === path || folder.path.startsWith(`${path}/`)).map(folder => folder.id));
     const relations = await this.relations();
-    const removedRelations = relations.filter(relation => itemIds.has(relation.source_id) || itemIds.has(relation.target_id));
+    const removedRelations = relations.filter(relation => itemIds.has(relation.source_id) || itemIds.has(relation.target_id) || folderIds.has(relation.source_id) || folderIds.has(relation.target_id));
     const auxiliaryPaths = items.flatMap(item => [
       join(this.notesDirectory, `${item.id}.json`),
       join(this.bookmarksDirectory, `${item.id}.json`),
@@ -394,6 +504,11 @@ export class Library {
         const ids = new Set(relations.map(relation => relation.id));
         relations.push(...manifest.relations.filter(relation => !ids.has(relation.id)));
       });
+    }
+    const restoredItems = await this.items();
+    for (const itemId of manifest.item_ids || []) {
+      const note = restoredItems.find(item => item.id === itemId && item.kind === 'note');
+      if (note) await this.syncNoteBacklink(note);
     }
     return { id: manifest.id, kind: manifest.kind, title: manifest.title };
   }
@@ -636,6 +751,7 @@ export class Library {
     const items = (await this.items()).filter(item => item.status === 'ready' && (item.category === source || item.category.startsWith(`${source}/`)));
     const changes = items.map(item => ({ item_id: item.id, title: item.title, from: item.category, to: `${target}${item.category.slice(source.length)}`, reason: '文件夹调整', confidence: 1 }));
     const foldersBefore = await this.folders();
+    const folderMetadataBefore = await readJsonArray(this.folderMetadataFile);
     const foldersAfter = [...new Set(foldersBefore.map(path => path === source || path.startsWith(`${source}/`) ? `${target}${path.slice(source.length)}` : path).concat(target))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
     const views = await this.savedViews();
     const viewsBefore = JSON.parse(JSON.stringify(views));
@@ -644,6 +760,7 @@ export class Library {
     await this.moveItems(changes);
     try {
       await writeJsonFile(this.foldersFile, foldersAfter);
+      await this.remapFolderRecords([{ from: source, to: target }]);
       for (const change of viewChanges) {
         const view = views.find(value => value.id === change.id);
         if (view) view.category = change.to;
@@ -654,6 +771,7 @@ export class Library {
     } catch (error) {
       await this.moveItems(changes, 'reverse').catch(() => {});
       await writeJsonFile(this.foldersFile, foldersBefore).catch(() => {});
+      await writeJsonFile(this.folderMetadataFile, folderMetadataBefore).catch(() => {});
       await writeJsonFile(this.savedViewsFile, viewsBefore).catch(() => {});
       throw error;
     }
@@ -674,6 +792,7 @@ export class Library {
     } catch (error) {
       await this.moveItems([...changes].reverse(), 'reverse').catch(() => {});
       await writeJsonFile(this.foldersFile, foldersBefore).catch(() => {});
+      await writeJsonFile(this.folderMetadataFile, folderMetadataBefore).catch(() => {});
       await writeJsonFile(this.savedViewsFile, viewsBefore).catch(() => {});
       throw error;
     }
@@ -695,6 +814,7 @@ export class Library {
       const generated = new Set(record.generated_folders || []);
       const folders = [...new Set((await this.folders()).filter(path => !generated.has(path)).concat(record.snapshot.folders || []))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
       await writeJsonFile(this.foldersFile, folders);
+      if (record.folder_change) await this.remapFolderRecords([{ from: record.folder_change.target, to: record.folder_change.source }]);
       const views = await this.savedViews();
       for (const saved of record.snapshot.views || []) {
         const view = views.find(value => value.id === saved.id);
@@ -731,6 +851,7 @@ export class Library {
       const folders = await this.folders();
       const restored = [...new Set(folders.map(path => path === target || path.startsWith(`${target}/`) ? `${source}${path.slice(target.length)}` : path).concat(source))].sort((a, b) => a.localeCompare(b, 'zh-CN'));
       await writeJsonFile(this.foldersFile, restored);
+      await this.remapFolderRecords([{ from: target, to: source }]);
       const views = await this.savedViews();
       for (const change of viewChanges) {
         const view = views.find(value => value.id === change.id);
@@ -845,8 +966,6 @@ export class Library {
     const boundItem = boundItemId ? items.find(item => item.id === boundItemId && item.status === 'ready' && item.kind !== 'note') : null;
     if (boundItemId && !boundItem) throw new Error('Bound item not found');
     const category = boundItem ? boundItem.category : this.normalizeCategory(payload.category);
-    const anchor = payload.anchor == null ? null : normalizeReadingAnchor(payload.anchor, { allowView: true });
-    if (payload.anchor != null && !anchor) throw new Error('Invalid note anchor');
     const id = randomUUID();
     const receivedAt = new Date().toISOString();
     if (!boundItem) {
@@ -855,7 +974,7 @@ export class Library {
         manual_tags: [], zotero_tags: [], agent_tags: [], summary: '', quality_score: null,
         published_at: null, received_at: receivedAt.slice(0, 10), created_at: receivedAt,
         original_name: `${title}.md`, source_url: null, summary_basis: 'user_note',
-        bound_item_id: null, anchor: null, favorite: false, reading_status: 'unread',
+        bound_item_id: null, anchor: null, linked_item_ids: [], linked_note_ids: [], favorite: false, reading_status: 'unread',
       }, String(payload.content || ''));
       return vaultRecordToItem(record);
     }
@@ -870,13 +989,91 @@ export class Library {
       published_at: null, publication_evidence: '', received_at: receivedAt.slice(0, 10), created_at: receivedAt, updated_at: receivedAt,
       asset_path: assetPath, original_name: `${title}.md`, source_url: null, summary_basis: 'user_note', fingerprint: null,
       analysis_provider: null, analysis_model: null, decision_provider: null, decision_confidence: null, review_reason: '', extraction: null,
-      corrected_text: null, bound_item_id: boundItemId, anchor,
+      corrected_text: null, bound_item_id: boundItemId, anchor: null,
+      linked_item_ids: [boundItemId], linked_note_ids: [],
     };
-    await writeTextFile(assetPath, String(payload.content || ''));
-    await writeTextFile(textPath(path), String(payload.content || ''));
-    await writeJsonFile(path, item);
-    await writeTextFile(summaryPath(path), renderNote(item));
+    try {
+      await writeTextFile(assetPath, String(payload.content || ''));
+      await writeTextFile(textPath(path), String(payload.content || ''));
+      await writeJsonFile(path, item);
+      await writeTextFile(summaryPath(path), renderNote(item));
+      await this.setMaterialLinkedNotes(boundItem, [...uniqueIds(boundItem.linked_note_ids), id]);
+      await this.addRelation({ source_id: id, target_id: boundItemId, type: 'belongs_to' });
+    } catch (error) {
+      await Promise.all([
+        rm(assetPath, { force: true }), rm(textPath(path), { force: true }), rm(path, { force: true }), rm(summaryPath(path), { force: true }),
+      ]);
+      await updateJsonArray(this.relationsFile, relations => {
+        const remaining = relations.filter(relation => !((relation.source_id === id && relation.target_id === boundItemId) || (relation.source_id === boundItemId && relation.target_id === id)));
+        relations.splice(0, relations.length, ...remaining);
+      }).catch(() => {});
+      await this.setMaterialLinkedNotes(boundItem, uniqueIds(boundItem.linked_note_ids).filter(noteId => noteId !== id)).catch(() => {});
+      throw error;
+    }
     return item;
+  }
+
+  async setMaterialLinkedNotes(material, noteIds) {
+    if (!material || material.kind === 'note') return null;
+    const linkedNoteIds = uniqueIds(noteIds);
+    if (material.storage === 'vault') {
+      const saved = await this.vault.update(material.id, {
+        metadata: { linked_note_ids: linkedNoteIds }, expectedRevision: material.vault_revision,
+      });
+      return vaultRecordToItem(saved);
+    }
+    const stored = { ...material, linked_note_ids: linkedNoteIds, updated_at: new Date().toISOString() };
+    delete stored.metadata_path;
+    delete stored.vault_revision;
+    await writeJsonFile(material.metadata_path, stored);
+    return { ...material, ...stored, metadata_path: material.metadata_path };
+  }
+
+  async writeNoteOwnership(note, materialId) {
+    const linkedItemIds = materialId ? [materialId] : [];
+    if (note.storage === 'vault') {
+      const saved = await this.vault.update(note.id, {
+        metadata: { bound_item_id: materialId, linked_item_ids: linkedItemIds, anchor: null }, expectedRevision: note.vault_revision,
+      });
+      return vaultRecordToItem(saved);
+    }
+    const stored = { ...note, bound_item_id: materialId, linked_item_ids: linkedItemIds, anchor: null, updated_at: new Date().toISOString() };
+    delete stored.metadata_path;
+    delete stored.vault_revision;
+    await writeJsonFile(note.metadata_path, stored);
+    await writeTextFile(summaryPath(note.metadata_path), renderNote(stored));
+    return { ...note, ...stored, metadata_path: note.metadata_path };
+  }
+
+  async setNoteOwnership(note, material) {
+    let current = note;
+    if (current.category !== material.category) current = await this.patchItem(current.id, { category: material.category });
+    current = await this.writeNoteOwnership(current, material.id);
+    await this.setMaterialLinkedNotes(material, [...uniqueIds(material.linked_note_ids), current.id]);
+    return current;
+  }
+
+  async clearNoteOwnership(relation) {
+    const items = await this.items();
+    const source = items.find(item => item.id === relation.source_id);
+    const target = items.find(item => item.id === relation.target_id);
+    const note = source?.kind === 'note' ? source : target?.kind === 'note' ? target : null;
+    const material = note?.id === source?.id ? target : source;
+    if (!note || !material || material.kind === 'note') return null;
+    await this.writeNoteOwnership(note, null);
+    await this.setMaterialLinkedNotes(material, uniqueIds(material.linked_note_ids).filter(id => id !== note.id));
+    return note;
+  }
+
+  async syncNoteBacklink(note, { remove = false } = {}) {
+    const materialId = uniqueIds(note?.linked_item_ids || (note?.bound_item_id ? [note.bound_item_id] : []))[0];
+    if (!materialId) return null;
+    const material = (await this.items()).find(item => item.id === materialId && item.kind !== 'note');
+    if (!material) return null;
+    const linked = new Set(uniqueIds(material.linked_note_ids));
+    if (remove) linked.delete(note.id);
+    else linked.add(note.id);
+    return this.setMaterialLinkedNotes(material, [...linked]);
   }
 
   async noteRecord(id) {
@@ -1149,14 +1346,16 @@ export class Library {
   }
 
   async tree() {
-    const root = { name: 'Library', path: '', count: 0, children: [] };
+    const folderRecords = await this.folderRecords();
+    const folderIds = new Map(folderRecords.map(folder => [folder.path, folder.id]));
+    const root = { id: folderIds.get(''), name: 'Library', path: '', count: 0, children: [] };
     const ensurePath = parts => {
       let node = root;
       for (let index = 0; index < parts.length; index++) {
         const path = parts.slice(0, index + 1).join('/');
         let child = node.children.find(value => value.name === parts[index]);
         if (!child) {
-          child = { name: parts[index], path, count: 0, children: [] };
+          child = { id: folderIds.get(path), name: parts[index], path, count: 0, children: [] };
           node.children.push(child);
         }
         node = child;
@@ -1506,7 +1705,7 @@ export class Library {
     const now = new Date().toISOString();
     await writeJsonFile(join(folder, 'note.json'), {
       id: item.id, kind: 'note', state: 'inbox', title: item.title, created_at: item.created_at || now, updated_at: now,
-      anchor: null, bound_item_id: null, detached_from: item.bound_item_id,
+      anchor: null, bound_item_id: null, linked_item_ids: [], linked_note_ids: [], detached_from: item.bound_item_id,
     });
     await Promise.all([
       rm(item.metadata_path, { force: true }), rm(textPath(item.metadata_path), { force: true }), rm(summaryPath(item.metadata_path), { force: true }),
@@ -1544,9 +1743,12 @@ export class Library {
       });
       if (!entry) return null;
       try {
+        if (item.kind === 'note') await this.syncNoteBacklink(item, { remove: true });
         if (removedRelations.length) await writeJsonFile(this.relationsFile, relations.filter(relation => !removedRelations.includes(relation)));
       } catch (error) {
         await this.trashStore.restore(entry.id).catch(() => {});
+        if (item.kind === 'note') await this.syncNoteBacklink(item).catch(() => {});
+        await writeJsonFile(this.relationsFile, relations).catch(() => {});
         throw error;
       }
       return { ...item, trash_id: entry.id };
@@ -1583,9 +1785,12 @@ export class Library {
     });
     if (!entry) return null;
     try {
+      if (item.kind === 'note') await this.syncNoteBacklink(item, { remove: true });
       if (removedRelations.length) await writeJsonFile(this.relationsFile, relations.filter(relation => !removedRelations.includes(relation)));
     } catch (error) {
       await this.trashStore.restore(entry.id).catch(() => {});
+      if (item.kind === 'note') await this.syncNoteBacklink(item).catch(() => {});
+      await writeJsonFile(this.relationsFile, relations).catch(() => {});
       throw error;
     }
 

@@ -119,8 +119,15 @@ export function createApi(library) {
     try {
       const url = new URL(request.url, 'http://localhost');
       validateRequestSource(request);
-      if (request.method === 'GET' && url.pathname === '/health') return send(response, 200, { status: 'ok', api_version: 15 });
+      if (request.method === 'GET' && url.pathname === '/health') return send(response, 200, { status: 'ok', api_version: 16 });
       if (request.method === 'GET' && url.pathname === '/api/library/tree') return send(response, 200, await library.tree());
+      if (request.method === 'GET' && url.pathname === '/api/library/folder-records') return send(response, 200, await library.folderRecords());
+      const folderRecordMatch = url.pathname.match(/^\/api\/library\/folder-records\/([0-9a-f-]{36})$/);
+      if (request.method === 'PATCH' && folderRecordMatch) {
+        const payload = JSON.parse((await bodyBuffer(request)).toString('utf8'));
+        const folder = await library.updateFolderMetadata(folderRecordMatch[1], payload);
+        return send(response, folder ? 200 : 404, folder || { error: 'Folder not found' });
+      }
       if (request.method === 'POST' && url.pathname === '/api/library/folders') {
         const payload = JSON.parse((await bodyBuffer(request)).toString('utf8'));
         return send(response, 201, await library.addFolder(payload));

@@ -7,7 +7,7 @@
   <title>InfoBox · 本地知识工作台</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/vendor/katex.min.css">
-  <link rel="stylesheet" href="/styles.css?v=38">
+  <link rel="stylesheet" href="/styles.css?v=40">
   <script defer src="/vendor/katex.min.js"></script>
 </head>
 <body>
@@ -163,7 +163,7 @@
         <header class="graph-head">
           <div><p class="eyebrow">KNOWLEDGE MAP</p><h3>知识图谱</h3><p class="graph-help">单击聚焦 · 双击文件夹进入列表 · 双击文件打开 · 拖动平移</p></div>
           <div class="graph-head-tools">
-            <div class="graph-legend"><span><i class="legend-folder"></i>文件夹层级</span><span><i class="legend-relation"></i>资料关联</span><span><i class="legend-similar"></i>相似标签</span></div>
+            <div class="graph-legend"><span><i class="legend-folder"></i>文件夹层级</span><span><i class="legend-note-link"></i>笔记所属</span><span><i class="legend-relation"></i>双向连接</span><span><i class="legend-similar"></i>相似标签</span></div>
             <div class="graph-controls" aria-label="图谱缩放">
               <button type="button" data-graph-action="zoom-out" aria-label="缩小图谱">−</button>
               <span id="graphZoom">100%</span>
@@ -185,10 +185,13 @@
       <div class="inspector-content" id="inspectorContent" hidden></div>
       <section class="notes-panel" id="notesPanel" hidden>
         <header class="notes-header">
-          <div><p class="eyebrow">ANCHORED NOTES</p><h3>阅读便签</h3></div>
+          <div><p class="eyebrow">READING NOTES</p><h3>阅读便签</h3></div>
           <div class="reading-side-actions">
             <button class="bookmark-button" id="bookmarkButton" type="button" aria-expanded="false">书签 <span id="bookmarkCount">0</span></button>
-            <button class="bookmark-button" id="newNotebookButton" type="button">＋ 笔记</button>
+            <div class="linked-notebook-menu" id="linkedNotebookMenu">
+              <button class="bookmark-button linked-notebook-button" id="newNotebookButton" type="button" aria-expanded="false">笔记 <span id="linkedNotebookCount">0</span></button>
+              <section class="linked-notebook-popover" id="linkedNotebookPopover" hidden aria-label="资料链接笔记"></section>
+            </div>
             <button class="new-note-button" id="newNoteButton">＋ 便签</button>
           </div>
         </header>
@@ -226,6 +229,6 @@
       <footer><button class="secondary-action" type="button" data-url-import-cancel>取消</button><button class="primary-action" id="urlImportSubmit" type="button">加入收件箱</button></footer>
     </section>
   </div>
-  <script type="module" src="/app.js?v=42"></script>
+  <script type="module" src="/app.js?v=49"></script>
 </body>
 </html>

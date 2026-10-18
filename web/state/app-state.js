@@ -5,6 +5,7 @@ export const state = {
   inboxAvailable: null,
   backendCompatible: null,
   tree: null,
+  folderRecords: [],
   scope: 'all',
   category: '',
   tag: '',
@@ -34,6 +35,7 @@ export const state = {
   navigationIndex: -1,
   restoringNavigation: false,
   selectedId: null,
+  selectedFolderId: null,
   tab: 'asset',
   renderToken: 0,
   collapsedFolders: new Set(),
@@ -41,14 +43,15 @@ export const state = {
   sidebarCollapsed: false,
   readingMode: false,
   pinning: false,
-  notebookPinning: false,
-  pendingNotebookAnchor: null,
+  linkedNotebookOpen: false,
+  linkedNotebookCloseTimer: null,
   pendingNoteCreate: null,
   boundNotebookNotes: [],
   activeNotebook: null,
   notebookEditor: null,
   notebookSaveChain: null,
   notebookContent: '',
+  notebookMode: 'edit',
   notebookPreview: false,
   notebookSaveTimer: null,
   notebookReaderPlaceholder: null,
@@ -66,6 +69,7 @@ export const state = {
   processingInbox: false,
   inboxProgress: '',
   editingItemId: null,
+  editingFolderId: null,
   busyAction: false,
 };
 
@@ -81,4 +85,4 @@ export const basisNames = {
 };
 
 export const readingNames = { unread: '未读', reading: '阅读中', read: '已读' };
-export const relationNames = { related: '相关', cites: '引用', supports: '支持', contradicts: '反驳', follow_up: '后续研究' };
+export const relationNames = { belongs_to: '属于', related: '相关', cites: '引用', supports: '支持', contradicts: '反驳', follow_up: '后续研究' };
