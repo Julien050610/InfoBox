@@ -1,8 +1,11 @@
 {
   "name": "personal-infobox",
-  "version": "0.1.2",
+  "version": "0.2.0-beta.1",
+  "description": "A local-first Windows knowledge inbox and workbench.",
+  "author": "Julien050610",
   "private": true,
   "type": "module",
+  "main": "desktop/main.js",
   "scripts": {
     "build:editor": "node scripts/build-editor.mjs",
     "prestart": "npm run build:editor",
@@ -11,7 +14,9 @@
     "workbench": "node src/server.js",
     "run:once": "node src/run-once.js",
     "pretest": "npm run build:editor",
-    "test": "node --test"
+    "test": "node --test",
+    "desktop": "npm run build:editor && electron .",
+    "package:win": "npm run build:editor && electron-builder --win portable --x64"
   },
   "engines": {
     "node": ">=24"
@@ -31,6 +36,34 @@
     "yazl": "^3.3.1"
   },
   "devDependencies": {
+    "electron": "^44.9.0",
+    "electron-builder": "^26.15.3",
     "esbuild": "^0.28.2"
+  },
+  "build": {
+    "appId": "com.infobox.desktop",
+    "productName": "InfoBox",
+    "artifactName": "InfoBox-${version}-windows-${arch}.${ext}",
+    "asar": true,
+    "directories": {
+      "output": "dist-desktop"
+    },
+    "files": [
+      "desktop/**/*",
+      "src/**/*",
+      "web/**/*",
+      "package.json",
+      "!**/*.map"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    }
   }
 }
