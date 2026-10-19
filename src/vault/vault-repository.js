@@ -53,6 +53,13 @@ export function parseVaultMarkdown(source, path = '') {
     });
   }
   const metadata = document.toJS() || {};
+  // Tags added by an external editor have no generated source, so treat them as manual.
+  const sourcedTags = new Set(mergedTags(metadata));
+  metadata.manual_tags = uniqueStrings([
+    ...uniqueStrings(metadata.manual_tags),
+    ...uniqueStrings(metadata.tags).filter(tag => !sourcedTags.has(tag)),
+  ]);
+  metadata.tags = mergedTags(metadata);
   return { document, metadata, content: normalized.slice(match[0].length), revision: revisionOf(normalized), source: normalized };
 }
 
@@ -105,11 +112,13 @@ export class VaultRepository {
   async create(metadata, content = '') {
     const id = assertId(metadata?.id);
     const path = this.notePath(id);
-    if (await this.exists(id)) throw new ConflictError('A vault note with this ID already exists', 'VAULT_NOTE_EXISTS');
-    const normalized = normalizeMetadata({ ...metadata, id }, { creating: true });
-    const document = frontmatterDocument(normalized);
-    await writeTextFile(path, stringifyVaultMarkdown(document, content));
-    return this.read(id);
+    return serialize(path, async () => {
+      if (await this.exists(id)) throw new ConflictError('A vault note with this ID already exists', 'VAULT_NOTE_EXISTS');
+      const normalized = normalizeMetadata({ ...metadata, id }, { creating: true });
+      const document = frontmatterDocument(normalized);
+      await writeTextFile(path, stringifyVaultMarkdown(document, content));
+      return this.read(id);
+    });
   }
 
   async read(id) {
@@ -145,9 +154,9 @@ export class VaultRepository {
       if (!expectedRevision || current.revision !== expectedRevision) {
         throw new ConflictError('笔记已被外部程序修改，请重新加载后再保存。', 'VAULT_WRITE_CONFLICT');
       }
-      const changes = normalizeMetadata(metadata);
+      const changes = normalizeMetadata({ manual_tags: current.metadata.manual_tags, ...metadata });
       const combinedForTags = { ...current.metadata, ...changes };
-      if (['manual_tags', 'zotero_tags', 'agent_tags'].some(field => field in metadata)) changes.tags = mergedTags(combinedForTags);
+      changes.tags = mergedTags(combinedForTags);
       for (const [key, value] of Object.entries(changes)) {
         if (key === 'id') continue;
         if (value === undefined) current.document.delete(key);
@@ -169,8 +178,13 @@ export class VaultRepository {
     await mkdir(directory, { recursive: true });
     let name = `${base}${extension}`;
     let index = 1;
-    while (await access(join(directory, name)).then(() => true, () => false)) name = `${base}-${++index}${extension}`;
-    await writeFile(join(directory, name), bytes);
+    for (;;) {
+      try { await writeFile(join(directory, name), bytes, { flag: 'wx' }); break; }
+      catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        name = `${base}-${++index}${extension}`;
+      }
+    }
     return { name, relativePath: `../attachments/${id}/${encodeURIComponent(name)}` };
   }
 

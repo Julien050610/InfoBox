@@ -8,6 +8,7 @@ import { Library, SUPPORTED_INBOX_EXTENSIONS } from './library.js';
 import { errorResponse, ForbiddenError } from './errors.js';
 import { logger } from './logger.js';
 import { markdownToHtml } from '../web/markdown.js';
+import { ZoteroClient } from './zotero/zotero-client.js';
 
 try { process.loadEnvFile('.env'); } catch (error) { if (error.code !== 'ENOENT') throw error; }
 
@@ -114,12 +115,28 @@ async function sendFile(request, response, path, options = {}) {
   createReadStream(path).pipe(response);
 }
 
-export function createApi(library) {
+export function createApi(library, { zoteroClient = new ZoteroClient() } = {}) {
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://localhost');
       validateRequestSource(request);
       if (request.method === 'GET' && url.pathname === '/health') return send(response, 200, { status: 'ok', api_version: 16 });
+      if (request.method === 'GET' && url.pathname === '/api/zotero/status') return send(response, 200, await zoteroClient.status());
+      if (request.method === 'GET' && url.pathname === '/api/zotero/collections') return send(response, 200, await zoteroClient.collections({ start: url.searchParams.get('start'), limit: url.searchParams.get('limit') }));
+      if (request.method === 'GET' && url.pathname === '/api/zotero/items') return send(response, 200, await zoteroClient.items({ collectionKey: url.searchParams.get('collection_key'), start: url.searchParams.get('start'), limit: url.searchParams.get('limit') }));
+      if (request.method === 'GET' && url.pathname === '/api/zotero/tags') return send(response, 200, await zoteroClient.tags({ start: url.searchParams.get('start'), limit: url.searchParams.get('limit') }));
+      if (request.method === 'GET' && url.pathname === '/api/vault/links') return send(response, 200, await library.vaultLinkEdges());
+      const zoteroItemMatch = url.pathname.match(/^\/api\/zotero\/items\/([A-Z0-9]{8})$/i);
+      const zoteroChildrenMatch = url.pathname.match(/^\/api\/zotero\/items\/([A-Z0-9]{8})\/children$/i);
+      const zoteroAnnotationsMatch = url.pathname.match(/^\/api\/zotero\/items\/([A-Z0-9]{8})\/annotations$/i);
+      const zoteroNoteMatch = url.pathname.match(/^\/api\/zotero\/items\/([A-Z0-9]{8})\/literature-note$/i);
+      if (request.method === 'GET' && zoteroItemMatch) return send(response, 200, await zoteroClient.item(zoteroItemMatch[1]));
+      if (request.method === 'GET' && zoteroChildrenMatch) return send(response, 200, await zoteroClient.children(zoteroChildrenMatch[1], { start: url.searchParams.get('start'), limit: url.searchParams.get('limit') }));
+      if (request.method === 'GET' && zoteroAnnotationsMatch) return send(response, 200, await zoteroClient.annotations(zoteroAnnotationsMatch[1]));
+      if (request.method === 'POST' && zoteroNoteMatch) {
+        const entry = await zoteroClient.item(zoteroNoteMatch[1]);
+        return send(response, 201, await library.createZoteroLiteratureNote(entry));
+      }
       if (request.method === 'GET' && url.pathname === '/api/library/tree') return send(response, 200, await library.tree());
       if (request.method === 'GET' && url.pathname === '/api/library/folder-records') return send(response, 200, await library.folderRecords());
       const folderRecordMatch = url.pathname.match(/^\/api\/library\/folder-records\/([0-9a-f-]{36})$/);
@@ -204,6 +221,11 @@ export function createApi(library) {
         return send(response, 201, await library.createLibraryNote(payload));
       }
       const notebookMatch = url.pathname.match(/^\/api\/notebook\/notes\/([0-9a-f-]{36})$/);
+      const notebookLinksMatch = url.pathname.match(/^\/api\/notebook\/notes\/([0-9a-f-]{36})\/links$/);
+      if (request.method === 'GET' && notebookLinksMatch) {
+        const links = await library.vaultLinks(notebookLinksMatch[1]);
+        return send(response, links ? 200 : 404, links || { error: 'Vault note not found' });
+      }
       if (request.method === 'GET' && notebookMatch) {
         const note = await library.noteContent(notebookMatch[1]);
         return send(response, note ? 200 : 404, note || { error: 'Notebook note not found' });
@@ -373,8 +395,8 @@ export function createApi(library) {
       }
       const staticFiles = new Map([
         ['/', 'index.html'], ['/index.html', 'index.html'], ['/styles.css', 'styles.css'], ['/app.js', 'app.js'], ['/markdown.js', 'markdown.js'], ['/favicon.svg', 'favicon.svg'],
-        ['/api/client.js', 'api/client.js'], ['/state/app-state.js', 'state/app-state.js'], ['/ui/dom.js', 'ui/dom.js'], ['/library/filtering.js', 'library/filtering.js'],
-        ['/editor/math.js', 'editor/math.js'], ['/vendor/codemirror-editor.js', 'vendor/codemirror-editor.js'],
+        ['/api/client.js', 'api/client.js'], ['/state/app-state.js', 'state/app-state.js'], ['/ui/dom.js', 'ui/dom.js'], ['/ui/workspace-layout.js', 'ui/workspace-layout.js'], ['/ui/hierarchy-picker.js', 'ui/hierarchy-picker.js'], ['/library/filtering.js', 'library/filtering.js'],
+        ['/editor/math.js', 'editor/math.js'], ['/graph-viewport.js', 'graph-viewport.js'], ['/vault-links.js', 'vault-links.js'], ['/vendor/codemirror-editor.js', 'vendor/codemirror-editor.js'],
       ]);
       const vendorFiles = new Map([['/vendor/pdf.mjs', 'pdf.mjs'], ['/vendor/pdf.worker.mjs', 'pdf.worker.mjs']]);
       if (request.method === 'GET' && vendorFiles.has(url.pathname)) {

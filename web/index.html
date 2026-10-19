@@ -7,7 +7,7 @@
   <title>InfoBox · 本地知识工作台</title>
   <link rel="icon" href="/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/vendor/katex.min.css">
-  <link rel="stylesheet" href="/styles.css?v=40">
+  <link rel="stylesheet" href="/styles.css?v=43">
   <script defer src="/vendor/katex.min.js"></script>
 </head>
 <body>
@@ -15,6 +15,7 @@
   <button class="sidebar-toggle" id="sidebarToggle" aria-label="收起左侧栏" title="收起左侧栏">‹</button>
   <main class="workspace" id="workspace">
     <aside class="sidebar" aria-label="知识库导航">
+      <div class="panel-resizer panel-resizer-left" id="sidebarResizer" role="separator" aria-orientation="vertical" aria-label="调整左侧栏宽度" tabindex="0"></div>
       <header class="brand">
         <div class="brand-mark">IB</div>
         <div>
@@ -57,6 +58,9 @@
         <button class="nav-item" data-scope="unread">
           <span class="nav-icon">○</span><span>未读</span><span class="nav-count" id="unreadCount">0</span>
         </button>
+        <button class="nav-item nav-source" id="zoteroButton" type="button">
+          <span class="nav-icon">Z</span><span>Zotero 文献</span><span class="nav-count">API</span>
+        </button>
       </nav>
 
       <section class="saved-views-section">
@@ -95,14 +99,23 @@
           <input id="searchInput" type="search" placeholder="搜索标题、摘要、标签和全文" autocomplete="off">
           <kbd>Ctrl K</kbd>
         </label>
-        <button class="toolbar-button" id="filterButton" aria-expanded="false"><span>筛选</span><b id="filterCount" hidden>0</b></button>
-        <button class="toolbar-button" id="graphButton" aria-pressed="false"><span>◌</span> 知识图谱</button>
-        <div class="structure-toolbar" aria-label="知识结构操作">
-          <button class="toolbar-button structure-run-button" id="structureButton" aria-pressed="false"><span>⌘</span> 重构</button>
-          <button class="toolbar-button structure-cancel-button" id="structureCancelButton" hidden>取消</button>
-          <button class="toolbar-button rollback-button" id="rollbackButton" aria-expanded="false"><span>↶</span> 回退</button>
+        <div class="topbar-actions">
+          <button class="toolbar-button" id="filterButton" aria-expanded="false"><span>筛选</span><b id="filterCount" hidden>0</b></button>
+          <button class="toolbar-button" id="graphButton" aria-pressed="false"><span>◌</span> 知识图谱</button>
+          <details class="organize-menu">
+            <summary class="toolbar-button"><span>⌘</span> 整理 <span aria-hidden="true">⌄</span></summary>
+            <div class="organize-popover">
+              <p><strong>知识结构</strong><small>批量重构目录，或回到最近一次结构快照。</small></p>
+              <div class="structure-toolbar" aria-label="知识结构操作">
+                <button class="toolbar-button structure-run-button" id="structureButton" aria-pressed="false"><span>⌘</span> 重构</button>
+                <button class="toolbar-button structure-cancel-button" id="structureCancelButton" hidden>取消</button>
+                <button class="toolbar-button rollback-button" id="rollbackButton" aria-expanded="false"><span>↶</span> 回退</button>
+              </div>
+            </div>
+          </details>
+          <button class="icon-button" id="refreshButton" title="刷新资料" aria-label="刷新资料">↻</button>
         </div>
-        <button class="icon-button" id="refreshButton" title="刷新资料" aria-label="刷新资料">↻</button>
+        <div class="active-filter-bar" id="activeFilterBar" hidden aria-label="当前筛选条件"></div>
       </header>
 
       <section class="filter-panel" id="filterPanel" hidden aria-label="资料筛选">
@@ -132,6 +145,8 @@
         <div class="item-list" id="itemList"></div>
       </section>
 
+      <div class="catalog-resizer" id="catalogResizer" role="separator" aria-orientation="horizontal" aria-label="调整资料列表与预览区高度" tabindex="0"><span></span></div>
+
       <section class="reader" aria-label="文件阅读器">
         <header class="reader-toolbar">
           <div class="reader-title">
@@ -145,7 +160,7 @@
             <button class="reading-toggle" id="readingToggle" aria-pressed="false"><span>▣</span> 阅读模式</button>
             <div class="tabs" role="tablist" aria-label="阅读模式">
               <button class="tab is-active" data-tab="asset" role="tab">原件</button>
-              <button class="tab" data-tab="markdown" role="tab">笔记</button>
+              <button class="tab" data-tab="markdown" role="tab">摘要</button>
             </div>
             <a class="open-button is-disabled" id="openOriginal" target="_blank" rel="noreferrer">新窗口打开 ↗</a>
           </div>
@@ -154,7 +169,7 @@
           <div class="viewer-empty">
             <div class="empty-glyph">文</div>
             <p>从上方资料列表中选择一项</p>
-            <span>原件和知识笔记会显示在这里</span>
+            <span>原件和资料摘要会显示在这里</span>
           </div>
         </div>
       </section>
@@ -163,11 +178,12 @@
         <header class="graph-head">
           <div><p class="eyebrow">KNOWLEDGE MAP</p><h3>知识图谱</h3><p class="graph-help">单击聚焦 · 双击文件夹进入列表 · 双击文件打开 · 拖动平移</p></div>
           <div class="graph-head-tools">
-            <div class="graph-legend"><span><i class="legend-folder"></i>文件夹层级</span><span><i class="legend-note-link"></i>笔记所属</span><span><i class="legend-relation"></i>双向连接</span><span><i class="legend-similar"></i>相似标签</span></div>
+            <div class="graph-legend"><span><i class="legend-folder"></i>文件夹层级</span><span><i class="legend-note-link"></i>笔记所属</span><span><i class="legend-relation"></i>连接</span></div>
             <div class="graph-controls" aria-label="图谱缩放">
               <button type="button" data-graph-action="zoom-out" aria-label="缩小图谱">−</button>
               <span id="graphZoom">100%</span>
               <button type="button" data-graph-action="zoom-in" aria-label="放大图谱">＋</button>
+              <button type="button" data-graph-action="fit-focus" aria-label="适应当前高亮节点">聚焦适应</button>
               <button type="button" data-graph-action="reset" aria-label="重置图谱视图">适应</button>
             </div>
           </div>
@@ -177,6 +193,7 @@
     </section>
 
     <aside class="inspector" aria-label="资料信息">
+      <div class="panel-resizer panel-resizer-right" id="inspectorResizer" role="separator" aria-orientation="vertical" aria-label="调整右侧栏宽度" tabindex="0"></div>
       <div class="inspector-empty" id="inspectorEmpty">
         <span class="inspector-index">00</span>
         <p>资料信息</p>
@@ -189,7 +206,7 @@
           <div class="reading-side-actions">
             <button class="bookmark-button" id="bookmarkButton" type="button" aria-expanded="false">书签 <span id="bookmarkCount">0</span></button>
             <div class="linked-notebook-menu" id="linkedNotebookMenu">
-              <button class="bookmark-button linked-notebook-button" id="newNotebookButton" type="button" aria-expanded="false">笔记 <span id="linkedNotebookCount">0</span></button>
+              <button class="bookmark-button linked-notebook-button" id="newNotebookButton" type="button" aria-expanded="false">资料笔记 <span id="linkedNotebookCount">0</span></button>
               <section class="linked-notebook-popover" id="linkedNotebookPopover" hidden aria-label="资料链接笔记"></section>
             </div>
             <button class="new-note-button" id="newNoteButton">＋ 便签</button>
@@ -201,6 +218,7 @@
       </section>
     </aside>
   </main>
+  <button class="inspector-toggle" id="inspectorToggle" aria-label="收起右侧栏" title="收起右侧栏">›</button>
   <div class="anchor-markers" id="anchorMarkers" aria-hidden="true"></div>
   <svg class="note-lines" id="noteLines" aria-hidden="true"></svg>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
@@ -229,6 +247,16 @@
       <footer><button class="secondary-action" type="button" data-url-import-cancel>取消</button><button class="primary-action" id="urlImportSubmit" type="button">加入收件箱</button></footer>
     </section>
   </div>
-  <script type="module" src="/app.js?v=49"></script>
+  <div class="dialog-scrim" id="zoteroDialog" hidden>
+    <section class="zotero-dialog" role="dialog" aria-modal="true" aria-labelledby="zoteroDialogTitle">
+      <header><div><p class="eyebrow">ZOTERO LOCAL API</p><h3 id="zoteroDialogTitle">Zotero 文献</h3><small id="zoteroStatus">正在连接 Zotero…</small></div><button type="button" id="zoteroClose" aria-label="关闭 Zotero 文献">×</button></header>
+      <div class="zotero-browser">
+        <nav class="zotero-collections" id="zoteroCollections" aria-label="Zotero 分类"></nav>
+        <section class="zotero-items"><div id="zoteroItems"></div><footer><button type="button" id="zoteroPrev">上一页</button><span id="zoteroPage">1</span><button type="button" id="zoteroNext">下一页</button></footer></section>
+        <article class="zotero-detail" id="zoteroDetail"><p>选择文献查看资料与附件。</p></article>
+      </div>
+    </section>
+  </div>
+  <script type="module" src="/app.js?v=53"></script>
 </body>
 </html>

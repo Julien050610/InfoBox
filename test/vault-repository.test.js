@@ -62,6 +62,58 @@ test('VaultRepository rejects stale saves without overwriting external edits', a
   assert.equal((await repository.read('note-conflict')).content, 'Obsidian 外部修改');
 }));
 
+test('external tags become manual tags and survive subsequent agent updates', async () => withFixture('infobox-vault-external-tags-', async root => {
+  const repository = new VaultRepository({ root: join(root, 'vault') });
+  await repository.init();
+  const created = await repository.create({ id: 'external-tags', manual_tags: ['manual'], agent_tags: ['old-agent'] }, '正文');
+  await writeFile(created.path, (await readFile(created.path, 'utf8')).replace('tags:\n  - manual\n  - old-agent', 'tags:\n  - manual\n  - old-agent\n  - obsidian'));
+  const opened = await repository.read(created.id);
+  assert.deepEqual(opened.metadata.manual_tags, ['manual', 'obsidian']);
+  const saved = await repository.update(created.id, { metadata: { agent_tags: ['new-agent'] }, expectedRevision: opened.revision });
+  assert.deepEqual(saved.metadata.tags, ['manual', 'obsidian', 'new-agent']);
+  assert.deepEqual(saved.document.get('manual_tags').toJSON(), ['manual', 'obsidian']);
+  const edited = await repository.update(created.id, { metadata: { manual_tags: ['manual'] }, expectedRevision: saved.revision });
+  assert.deepEqual(edited.metadata.tags, ['manual', 'new-agent']);
+}));
+
+test('concurrent Vault creates never replace an existing note', async () => withFixture('infobox-vault-create-race-', async root => {
+  const repository = new VaultRepository({ root: join(root, 'vault') });
+  await repository.init();
+  const results = await Promise.allSettled([
+    repository.create({ id: 'same-note' }, 'first'),
+    repository.create({ id: 'same-note' }, 'second'),
+  ]);
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+  assert.equal(results.find(result => result.status === 'rejected').reason.code, 'VAULT_NOTE_EXISTS');
+  assert.equal((await repository.read('same-note')).content, results.find(result => result.status === 'fulfilled').value.content);
+}));
+
+test('simultaneous same-name image uploads preserve every attachment', async () => withFixture('infobox-vault-image-race-', async root => {
+  const repository = new VaultRepository({ root: join(root, 'vault') });
+  await repository.init();
+  await repository.create({ id: 'image-note' }, '正文');
+  const uploads = Array.from({ length: 8 }, (_, index) => Buffer.from(`image-${index}`));
+  const assets = await Promise.all(uploads.map(bytes => repository.addAttachment('image-note', 'image.png', bytes)));
+  assert.equal(new Set(assets.map(asset => asset.name)).size, uploads.length);
+  for (const [index, asset] of assets.entries()) {
+    assert.deepEqual(await readFile(join(repository.attachmentDirectory('image-note'), asset.name)), uploads[index]);
+  }
+}));
+
+test('temporary note image uploads also preserve simultaneous same-name files', async () => withFixture('infobox-temporary-image-race-', async root => {
+  const library = new Library({ root });
+  await library.init({ watchInbox: false });
+  try {
+    const note = await library.createTemporaryNote({ title: '并发图片' });
+    const uploads = Array.from({ length: 8 }, (_, index) => Buffer.from(`image-${index}`));
+    const assets = await Promise.all(uploads.map(bytes => library.addNotebookAsset(note.id, 'image.png', bytes)));
+    assert.equal(new Set(assets.map(asset => asset.name)).size, uploads.length);
+    for (const [index, asset] of assets.entries()) {
+      assert.deepEqual(await readFile(await library.notebookAsset(note.id, asset.name)), uploads[index]);
+    }
+  } finally { library.close(); }
+}));
+
 test('VaultRepository reports external Markdown changes', async () => withFixture('infobox-vault-watch-', async root => {
   const repository = new VaultRepository({ root: join(root, 'vault') });
   await repository.init();
@@ -152,5 +204,27 @@ test('legacy note migration leaves its source intact and can roll back', async (
     const restored = (await library.items()).find(item => item.id === 'legacy-note');
     assert.notEqual(restored.storage, 'vault');
     assert.equal(await readFile(contentPath, 'utf8'), '# 旧笔记\n\n![图](assets/figure.png)');
+  } finally { library.close(); }
+}));
+
+test('Vault properties, backlinks, and stable links survive note rename and category move', async () => withFixture('infobox-vault-links-', async root => {
+  const library = new Library({ root });
+  await library.init({ watchInbox: false });
+  try {
+    const target = await library.createLibraryNote({ title: '旧标题', category: 'AI/Old', content: '# 核心贡献\n\n正文' });
+    const source = await library.createLibraryNote({ title: '来源', category: 'AI/Old', content: `[[${target.id}#核心贡献|引用]]\n\n![[${target.id}]]` });
+    const relation = await library.addRelation({ source_id: source.id, target_id: target.id, type: 'related' });
+    const updated = await library.updateNotebookNote(target.id, {
+      title: '新标题', expected_revision: target.vault_revision,
+      properties: { manual_tags: ['用户标签'], aliases: ['旧标题'], custom_score: 4 },
+    });
+    assert.deepEqual(updated.tags, ['用户标签']);
+    assert.equal(updated.custom_score, 4);
+    assert.deepEqual(updated.aliases, ['旧标题']);
+    await library.patchItem(target.id, { category: 'AI/New' });
+    assert.equal((await library.vaultLinks(source.id)).outgoing[0].id, target.id);
+    assert.equal((await library.vaultLinks(target.id)).backlinks[0].id, source.id);
+    assert.equal((await library.relations()).find(value => value.id === relation.id).target_id, target.id);
+    assert.match((await library.noteContent(source.id)).content, new RegExp(target.id));
   } finally { library.close(); }
 }));

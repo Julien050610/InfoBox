@@ -429,14 +429,16 @@ test('serves the local CodeMirror bundle and KaTeX assets without a CDN', async 
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   try {
-    const [editor, katexScript, katexStyle] = await Promise.all([
-      fetch(`${base}/vendor/codemirror-editor.js`), fetch(`${base}/vendor/katex.min.js`), fetch(`${base}/vendor/katex.min.css`),
+    const [editor, katexScript, katexStyle, hierarchyPicker] = await Promise.all([
+      fetch(`${base}/vendor/codemirror-editor.js`), fetch(`${base}/vendor/katex.min.js`), fetch(`${base}/vendor/katex.min.css`), fetch(`${base}/ui/hierarchy-picker.js`),
     ]);
     assert.equal(editor.status, 200);
     assert.match(editor.headers.get('content-type'), /javascript/);
     assert.match(await editor.text(), /createMarkdownEditor/);
     assert.equal(katexScript.status, 200);
     assert.equal(katexStyle.status, 200);
+    assert.equal(hierarchyPicker.status, 200);
+    assert.match(await hierarchyPicker.text(), /folderPickerLevel/);
     assert.match(katexStyle.headers.get('content-type'), /text\/css/);
   } finally {
     library.close();
@@ -756,6 +758,7 @@ test('supports deep folders and snapshot rollback without moving later items', a
   };
   await writeItem(originalId, '策略优化', '强化学习');
   await writeItem(outsideId, '细胞生物学', 'Biology');
+  const retainedRelation = await library.addRelation({ source_id: originalId, target_id: outsideId, type: 'related' });
   const server = createApi(library);
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -779,6 +782,7 @@ test('supports deep folders and snapshot rollback without moving later items', a
     assert.equal((await library.items()).find(item => item.id === originalId).category, 'Computer Science/AI/强化学习/策略优化');
     assert.equal((await library.items()).find(item => item.id === originalId).summary, '摘要');
     assert.equal((await library.items()).find(item => item.id === outsideId).category, 'Biology');
+    assert.equal((await library.relations()).find(value => value.id === retainedRelation.id).target_id, outsideId);
     assert.equal((await library.folders()).includes('强化学习/旧空目录'), false);
     assert.equal((await library.savedViews()).find(view => view.id === savedView.id).filters.folder, '');
 
@@ -788,6 +792,7 @@ test('supports deep folders and snapshot rollback without moving later items', a
     assert.equal(undo.status, 200);
     const restored = await library.items();
     assert.equal(restored.find(item => item.id === originalId).category, '强化学习');
+    assert.equal((await library.relations()).find(value => value.id === retainedRelation.id).source_id, originalId);
     assert.equal(restored.find(item => item.id === laterId).category, 'Computer Science/AI/强化学习/策略优化');
     assert.equal((await library.folders()).includes('强化学习/旧空目录'), true);
     assert.equal((await library.savedViews()).find(view => view.id === savedView.id).filters.folder, '强化学习');

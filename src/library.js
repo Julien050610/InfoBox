@@ -8,6 +8,7 @@ import { extractFile } from './extract.js';
 import { readJsonArray, readJsonFile, recoverPendingWrites, updateJsonArray, writeJsonFile, writeTextFile } from './storage/local-json-store.js';
 import { TrashStore } from './storage/trash-store.js';
 import { VaultRepository } from './vault/vault-repository.js';
+import { parseWikiLinks, resolveVaultTarget } from '../web/vault-links.js';
 
 const safePart = value => String(value || '').normalize('NFKC').replace(/[<>:"/\\|?*\x00-\x1f]/g, '-').replace(/[. ]+$/g, '').trim().slice(0, 80);
 const exists = async path => access(path).then(() => true, () => false);
@@ -41,7 +42,7 @@ function vaultRecordToItem(record) {
   return {
     ...metadata,
     id: record.id,
-    kind: metadata.type || 'note',
+    kind: metadata.type === 'literature' ? 'note' : metadata.type || 'note',
     status: metadata.status === 'review' ? 'review' : 'ready',
     vault_status: metadata.status || 'processed',
     title: String(metadata.title || '未命名笔记'),
@@ -67,6 +68,7 @@ function vaultRecordToItem(record) {
     asset_path: record.path,
     metadata_path: null,
     vault_revision: record.revision,
+    vault_properties: metadata,
   };
 }
 
@@ -142,6 +144,7 @@ export class Library {
     this.watcher = null;
     this.timers = new Map();
     this.vaultChangedAt = null;
+    this.zoteroNoteCreations = new Map();
   }
 
   async init({ watchInbox = true, watchVault = watchInbox } = {}) {
@@ -1097,12 +1100,77 @@ export class Library {
     return { note: record.note, content: await readFile(record.contentPath, 'utf8').catch(error => error.code === 'ENOENT' ? '' : Promise.reject(error)) };
   }
 
+  async vaultLinkIndex() {
+    const records = await this.vault.list();
+    const notes = records.map(record => ({ id: record.id, title: String(record.metadata.title || record.id), aliases: record.metadata.aliases || [], content: record.content }));
+    const edges = [];
+    for (const source of notes) {
+      for (const link of parseWikiLinks(source.content)) {
+        const target = resolveVaultTarget(link.target, notes, source.id);
+        if (target && !edges.some(edge => edge.source_id === source.id && edge.target_id === target.id)) {
+          edges.push({ source_id: source.id, target_id: target.id });
+        }
+      }
+    }
+    return { notes, edges };
+  }
+
+  async vaultLinkEdges() { return (await this.vaultLinkIndex()).edges; }
+
+  async vaultLinks(id) {
+    const { notes, edges } = await this.vaultLinkIndex();
+    if (!notes.some(note => note.id === id)) return null;
+    const decorate = value => ({ id: value.id, title: value.title });
+    return {
+      outgoing: edges.filter(edge => edge.source_id === id).map(edge => decorate(notes.find(note => note.id === edge.target_id))),
+      backlinks: edges.filter(edge => edge.target_id === id).map(edge => decorate(notes.find(note => note.id === edge.source_id))),
+    };
+  }
+
+  async createZoteroLiteratureNote(entry) {
+    const data = entry?.data || entry;
+    const key = String(data?.key || entry?.key || '').toUpperCase();
+    if (!/^[A-Z0-9]{8}$/.test(key) || !data?.title || ['attachment', 'note', 'annotation'].includes(data.itemType)) throw new Error('Invalid Zotero literature item');
+    if (this.zoteroNoteCreations.has(key)) return this.zoteroNoteCreations.get(key);
+    const pending = this.createZoteroLiteratureNoteRecord(data, key);
+    this.zoteroNoteCreations.set(key, pending);
+    try { return await pending; }
+    finally { this.zoteroNoteCreations.delete(key); }
+  }
+
+  async createZoteroLiteratureNoteRecord(data, key) {
+    const existing = (await this.vault.list()).find(note => note.metadata.zotero_key === key);
+    if (existing) return vaultRecordToItem(existing);
+    const title = safePart(data.title) || '未命名文献';
+    const authors = (data.creators || []).filter(value => value.creatorType === 'author')
+      .map(value => value.name || [value.firstName, value.lastName].filter(Boolean).join(' ')).filter(Boolean);
+    const year = String(data.date || '').match(/\b\d{4}\b/)?.[0] || null;
+    const uri = `zotero://select/library/items/${key}`;
+    const record = await this.vault.create({
+      id: randomUUID(), type: 'literature', title, category: 'Literature', status: 'processed',
+      zotero_key: key, zotero_library: 'user/0', doi: data.DOI || null, authors, year,
+      zotero_tags: (data.tags || []).map(value => value.tag).filter(Boolean), manual_tags: [], agent_tags: [],
+      summary: String(data.abstractNote || ''), source_url: uri, original_name: `${title}.md`, summary_basis: 'zotero_metadata',
+    }, `# ${title}\n\n## 核心贡献\n\n## Zotero 摘录\n\n## 我的理解\n\n## 与其他知识的联系\n`);
+    return vaultRecordToItem(record);
+  }
+
   async updateNotebookNote(id, changes = {}) {
     const record = await this.noteRecord(id);
     if (!record) return null;
     if (!changes || typeof changes !== 'object' || Array.isArray(changes)) throw new Error('Notebook update must be an object');
-    if (Object.keys(changes).some(key => !['title', 'content', 'expected_revision'].includes(key))) throw new Error('Unsupported notebook field');
+    if (Object.keys(changes).some(key => !['title', 'content', 'expected_revision', 'properties'].includes(key))) throw new Error('Unsupported notebook field');
     if ('content' in changes && (typeof changes.content !== 'string' || changes.content.length > 2_000_000)) throw new Error('Notebook content must be text under 2,000,000 characters');
+    if ('properties' in changes) {
+      if (record.type !== 'vault' || !changes.properties || typeof changes.properties !== 'object' || Array.isArray(changes.properties)) throw new Error('Properties require a Vault note');
+      const protectedFields = new Set(['id', 'type', 'title', 'status', 'category', 'tags', 'zotero_tags', 'agent_tags', 'created_at', 'updated_at', 'received_at', 'bound_item_id', 'linked_item_ids', 'linked_note_ids', 'anchor']);
+      for (const [key, value] of Object.entries(changes.properties)) {
+        if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(key) || protectedFields.has(key) || !(
+          typeof value === 'string' || typeof value === 'number' && Number.isFinite(value) || typeof value === 'boolean' ||
+          Array.isArray(value) && value.every(entry => typeof entry === 'string')
+        )) throw new Error(`Unsupported Vault property: ${key}`);
+      }
+    }
     if (record.type === 'temporary') {
       if ('title' in changes) record.note.title = safePart(changes.title) || '未命名笔记';
       if ('content' in changes) await writeTextFile(record.contentPath, changes.content);
@@ -1111,8 +1179,11 @@ export class Library {
       return record.note;
     }
     if (record.type === 'vault') {
-      const metadata = {};
-      if ('title' in changes) metadata.title = safePart(changes.title) || '未命名笔记';
+      const metadata = { ...(changes.properties || {}) };
+      if ('title' in changes) {
+        metadata.title = safePart(changes.title) || '未命名笔记';
+        if (metadata.title !== record.note.title) metadata.aliases = [...new Set([...(metadata.aliases || record.note.aliases || []), record.note.title])];
+      }
       const saved = await this.vault.update(id, {
         metadata,
         ...('content' in changes ? { content: changes.content } : {}),
@@ -1148,8 +1219,13 @@ export class Library {
     await mkdir(record.assetsPath, { recursive: true });
     let name = `${base}${extension}`;
     let index = 1;
-    while (await exists(join(record.assetsPath, name))) name = `${base}-${++index}${extension}`;
-    await writeFile(join(record.assetsPath, name), bytes);
+    for (;;) {
+      try { await writeFile(join(record.assetsPath, name), bytes, { flag: 'wx' }); break; }
+      catch (error) {
+        if (error.code !== 'EEXIST') throw error;
+        name = `${base}-${++index}${extension}`;
+      }
+    }
     return { name, markdown: `![${base}](assets/${encodeURIComponent(name)})` };
   }
 
@@ -1618,6 +1694,7 @@ export class Library {
         if (key === 'tags') metadata.manual_tags = item.tags;
         else metadata[key] = item[key];
       }
+      if (item.title !== previousTitle) metadata.aliases = [...new Set([...(item.aliases || []), previousTitle])];
       const saved = await this.vault.update(id, { metadata, expectedRevision: item.vault_revision });
       return vaultRecordToItem(saved);
     }

@@ -1,13 +1,32 @@
 import { getDocument, GlobalWorkerOptions } from '/vendor/pdf.mjs';
 import { markdownToHtml as renderMarkdownHtml } from '/markdown.js';
+import { fitGraphViewport } from '/graph-viewport.js';
+import { headingSlug, resolveVaultTarget } from '/vault-links.js';
 import { createMarkdownEditor } from '/vendor/codemirror-editor.js';
 import { api } from '/api/client.js';
 import { renderMathIn } from '/editor/math.js';
 import { activeFilterCount as countActiveFilters, filterItems, isRecent, scopeItems } from '/library/filtering.js';
 import { basisNames, kindNames, readingNames, relationNames, state } from '/state/app-state.js';
 import { elements, escapeHtml, formatBytes, inboxType, typeClass } from '/ui/dom.js';
+import { createWorkspaceLayout } from '/ui/workspace-layout.js';
+import { folderAtPath, folderBreadcrumbs, folderPickerLevel } from '/ui/hierarchy-picker.js';
 
 GlobalWorkerOptions.workerSrc = '/vendor/pdf.worker.mjs';
+
+createWorkspaceLayout({
+  workspace: elements.workspace,
+  sidebarToggle: elements.sidebarToggle,
+  inspectorToggle: elements.inspectorToggle,
+  sidebarResizer: elements.sidebarResizer,
+  inspectorResizer: elements.inspectorResizer,
+  catalogResizer: elements.catalogResizer,
+  contentColumn: elements.contentColumn,
+  onLayout(layout) {
+    state.sidebarCollapsed = layout.sidebarCollapsed;
+    state.inspectorCollapsed = layout.inspectorCollapsed;
+    requestAnimationFrame(layoutNotes);
+  },
+});
 
 function navigationSnapshot() {
   return {
@@ -83,6 +102,33 @@ function filteredItems() {
 
 function activeFilterCount() {
   return countActiveFilters(state.filters);
+}
+
+function activeFilterEntries() {
+  const entries = [];
+  if (state.query.trim()) entries.push({ key: 'query', label: `搜索：${state.query.trim()}` });
+  if (state.filters.folder) entries.push({ key: 'folder', label: `范围：Library / ${state.filters.folder}` });
+  state.filters.kinds.forEach(value => entries.push({ key: 'kinds', value, label: `类型：${kindNames[value] || value}` }));
+  state.filters.tags.forEach(value => entries.push({ key: 'tags', value, label: `标签：${value}` }));
+  state.filters.readingStatuses.forEach(value => entries.push({ key: 'readingStatuses', value, label: `阅读：${readingNames[value] || value}` }));
+  if (state.filters.status) entries.push({ key: 'status', label: `状态：${state.filters.status === 'ready' ? '已入库' : '待检查'}` });
+  if (state.filters.favorite !== 'any') entries.push({ key: 'favorite', label: state.filters.favorite === 'yes' ? '仅收藏' : '未收藏' });
+  if (state.filters.scoreMin) entries.push({ key: 'scoreMin', label: `评分：≥ ${state.filters.scoreMin}` });
+  if (state.filters.publishedFrom) entries.push({ key: 'publishedFrom', label: `发表自：${state.filters.publishedFrom}` });
+  if (state.filters.publishedTo) entries.push({ key: 'publishedTo', label: `发表至：${state.filters.publishedTo}` });
+  if (state.filters.receivedFrom) entries.push({ key: 'receivedFrom', label: `收件自：${state.filters.receivedFrom}` });
+  if (state.filters.receivedTo) entries.push({ key: 'receivedTo', label: `收件至：${state.filters.receivedTo}` });
+  if (state.filters.sort !== 'received_desc') {
+    const labels = { published_desc: '最近发表', score_desc: '评分最高', title_asc: '标题顺序' };
+    entries.push({ key: 'sort', label: `排序：${labels[state.filters.sort] || state.filters.sort}` });
+  }
+  return entries;
+}
+
+function renderActiveFilterChips() {
+  const entries = activeFilterEntries();
+  elements.activeFilterBar.hidden = !entries.length;
+  elements.activeFilterBar.innerHTML = entries.length ? `<span class="active-filter-label">当前结果</span>${entries.map(entry => `<button class="active-filter-chip" type="button" data-clear-filter="${entry.key}" ${entry.value ? `data-clear-filter-value="${escapeHtml(entry.value)}"` : ''} title="移除此条件"><span>${escapeHtml(entry.label)}</span><b>×</b></button>`).join('')}<button class="active-filter-clear" type="button" data-clear-all-filters>全部清除</button>` : '';
 }
 
 function folderCreatorHtml(parent, depth) {
@@ -185,6 +231,11 @@ function renderNavigation() {
   elements.structureButton.disabled = state.structureBusy;
   elements.structureCancelButton.hidden = !state.restructureSelecting;
   elements.rollbackButton.disabled = state.structureBusy || state.restructureSelecting;
+  const organizeSummary = document.querySelector('.organize-menu > summary');
+  if (organizeSummary) {
+    organizeSummary.innerHTML = state.restructureSelecting ? `<span>✓</span> 结构调整${selectedCount ? ` · ${selectedCount}` : ''} <span aria-hidden="true">⌄</span>` : '<span>⌘</span> 整理 <span aria-hidden="true">⌄</span>';
+    organizeSummary.classList.toggle('is-attention', state.restructureSelecting);
+  }
   elements.inboxChooseButton.disabled = state.inboxAvailable === false || state.uploadingInbox;
   elements.inboxDropzone.classList.toggle('is-unavailable', state.inboxAvailable === false);
   elements.processInboxButton.disabled = !supportedInboxCount || state.inboxAvailable === false || state.processingInbox || state.uploadingInbox;
@@ -195,6 +246,7 @@ function renderNavigation() {
   const filterCount = activeFilterCount();
   elements.filterCount.hidden = !filterCount;
   elements.filterCount.textContent = filterCount;
+  renderActiveFilterChips();
   document.querySelectorAll('.nav-item').forEach(button => button.classList.toggle('is-active', button.dataset.scope === state.scope));
 }
 
@@ -366,10 +418,10 @@ function itemRowHtml(item) {
     </span>
     <span class="item-tags">${(item.tags || []).slice(0, 2).map(tag => `<span class="mini-tag">${escapeHtml(tag)}</span>`).join('')}</span>
     <span class="item-date ${item.status === 'review' ? 'review-badge' : ''}">${escapeHtml(item.published_at || item.received_at || '日期未知')}</span>
-    <span class="row-actions">
-      ${item.status === 'ready' ? `<button class="row-action-button row-move-button" type="button" data-move-item="${item.id}" aria-label="移动 ${escapeHtml(item.title)}">移动</button>` : ''}
-      <button class="row-action-button row-delete-button" type="button" data-delete-list-item="${item.id}" aria-label="删除 ${escapeHtml(item.title)}">删除</button>
-    </span>
+    <div class="row-actions"><details class="row-action-menu"><summary aria-label="${escapeHtml(item.title)} 的更多操作" title="更多操作">•••</summary><div class="row-action-popover">
+      ${item.status === 'ready' ? `<button class="row-action-button row-move-button" type="button" data-move-item="${item.id}">移动</button>` : ''}
+      <button class="row-action-button row-delete-button" type="button" data-delete-list-item="${item.id}">删除</button>
+    </div></details></div>
   </div>`;
 }
 
@@ -379,10 +431,10 @@ function folderRowHtml(folder) {
     <span class="item-title"><strong>${escapeHtml(folder.name)}</strong><small>${folder.children?.length || 0} 个子文件夹 · ${folder.count} 项资料</small></span>
     <span class="item-tags"><span class="mini-tag">文件夹</span></span>
     <span class="item-date">进入 ›</span>
-    <span class="row-actions">
-      <button class="row-action-button row-move-button" type="button" data-move-folder="${escapeHtml(folder.path)}" aria-label="移动 ${escapeHtml(folder.name)}">移动</button>
-      <button class="row-action-button row-delete-button" type="button" data-delete-list-folder="${escapeHtml(folder.path)}" aria-label="删除 ${escapeHtml(folder.name)}">删除</button>
-    </span>
+    <div class="row-actions"><details class="row-action-menu"><summary aria-label="${escapeHtml(folder.name)} 的更多操作" title="更多操作">•••</summary><div class="row-action-popover">
+      <button class="row-action-button row-move-button" type="button" data-move-folder="${escapeHtml(folder.path)}">移动</button>
+      <button class="row-action-button row-delete-button" type="button" data-delete-list-folder="${escapeHtml(folder.path)}">删除</button>
+    </div></details></div>
   </div>`;
 }
 
@@ -402,7 +454,7 @@ function renderList() {
     elements.resultCount.textContent = `${notes.length} 篇草稿`;
     elements.list.closest('.catalog')?.querySelector('.catalog-hint')?.replaceChildren(document.createTextNode('完成后可手动送入收件箱分类'));
     elements.contentColumn.classList.remove('is-folder-browser');
-    elements.list.innerHTML = `<button class="temporary-note-create" type="button" data-new-temporary-note>＋ 新建临时笔记</button>${notes.map(note => `<div class="item-row notebook-row" data-open-notebook="${note.id}" tabindex="0"><span class="item-type note">笔</span><span class="item-title"><strong>${escapeHtml(note.title)}</strong><small>临时草稿 · ${new Date(note.updated_at).toLocaleString('zh-CN')}</small></span><span class="item-tags"><span class="mini-tag">Markdown</span></span><span class="item-date">编辑 ›</span><span class="row-actions"><button class="row-action-button row-delete-button" type="button" data-delete-temporary-note="${note.id}" aria-label="删除 ${escapeHtml(note.title)}">删除</button></span></div>`).join('') || '<div class="empty-list">还没有临时笔记</div>'}`;
+    elements.list.innerHTML = `<button class="temporary-note-create" type="button" data-new-temporary-note>＋ 新建临时笔记</button>${notes.map(note => `<div class="item-row notebook-row" data-open-notebook="${note.id}" tabindex="0"><span class="item-type note">笔</span><span class="item-title"><strong>${escapeHtml(note.title)}</strong><small>临时草稿 · ${new Date(note.updated_at).toLocaleString('zh-CN')}</small></span><span class="item-tags"><span class="mini-tag">Markdown</span></span><span class="item-date">预览 ›</span><div class="row-actions"><details class="row-action-menu"><summary aria-label="${escapeHtml(note.title)} 的更多操作" title="更多操作">•••</summary><div class="row-action-popover"><button class="row-action-button row-delete-button" type="button" data-delete-temporary-note="${note.id}">删除</button></div></details></div></div>`).join('') || '<div class="empty-list">还没有临时笔记</div>'}`;
     return;
   }
   if (state.scope === 'inbox') {
@@ -527,16 +579,12 @@ function graphData() {
     if (relation.type === 'belongs_to' && edges.some(edge => edge.ownership && ((edge.source === source && edge.target === target) || (edge.source === target && edge.target === source)))) continue;
     edges.push({ source, target, type: 'relation', relationType: relation.type, bidirectional: true, label: relationNames[relation.type] || '相关' });
   }
-  const similarity = [];
-  for (let i = 0; i < items.length; i++) for (let j = i + 1; j < items.length; j++) {
-    if (items[i].category === items[j].category) continue;
-    const shared = (items[i].tags || []).filter(tag => items[j].tags?.includes(tag));
-    if (!shared.length) continue;
-    const union = new Set([...(items[i].tags || []), ...(items[j].tags || [])]).size || 1;
-    similarity.push({ source: items[i].id, target: items[j].id, type: 'similarity', score: shared.length / union, label: `共同标签：${shared.join('、')}` });
+  for (const link of state.markdownLinks) {
+    const source = entityToGraph.get(link.source_id);
+    const target = entityToGraph.get(link.target_id);
+    if (!source || !target || edges.some(edge => edge.type === 'relation' && ((edge.source === source && edge.target === target) || (edge.source === target && edge.target === source)))) continue;
+    edges.push({ source, target, type: 'relation', bidirectional: true, label: 'Markdown 正文链接' });
   }
-  similarity.sort((a, b) => b.score - a.score);
-  edges.push(...similarity.slice(0, 120));
   return { nodes, edges, items, matchingIds, filtering, entityToGraph };
 }
 
@@ -619,6 +667,10 @@ function renderGraph() {
   const right = width - 145;
   const columnGap = (right - left) / Math.max(1, maxDepth);
   nodes.forEach(node => { node.x = left + node.depth * columnGap; });
+  if (state.graphAutoFit) {
+    state.graphViewport = fitGraphViewport(nodes, activeIds, width, height);
+    state.graphAutoFit = false;
+  }
   if (state.graphViewport.x === 0 && state.graphViewport.y === 0 && state.graphViewport.scale === 1 && worldHeight > height) {
     state.graphViewport.scale = Math.max(.45, (height - 18) / worldHeight);
     state.graphViewport.y = (height - worldHeight * state.graphViewport.scale) / 2;
@@ -644,7 +696,7 @@ function renderGraph() {
       path = `M ${a.x.toFixed(1)} ${a.y.toFixed(1)} Q ${middleX.toFixed(1)} ${arcY.toFixed(1)}, ${b.x.toFixed(1)} ${b.y.toFixed(1)}`;
     }
     const stroke = edge.type === 'structure' ? (b.color || '#718078') : '';
-    return `<path class="graph-edge ${edge.type} ${edge.ownership ? 'note-link' : ''} ${edge.bidirectional ? 'bidirectional' : ''} ${highlighted ? 'is-highlighted' : ''} ${muted ? 'is-muted' : ''}" d="${path}" ${stroke ? `style="stroke:${stroke}"` : ''}><title>${escapeHtml(edge.label || (edge.type === 'structure' ? '文件夹层级' : '双向连接'))}</title></path>`;
+    return `<path class="graph-edge ${edge.type} ${edge.ownership ? 'note-link' : ''} ${edge.bidirectional ? 'bidirectional' : ''} ${highlighted ? 'is-highlighted' : ''} ${muted ? 'is-muted' : ''}" d="${path}" ${stroke ? `style="stroke:${stroke}"` : ''}><title>${escapeHtml(edge.label || (edge.type === 'structure' ? '文件夹层级' : '连接'))}</title></path>`;
   }).join('');
   const nodeHtml = nodes.map(node => {
     const radius = node.type === 'root' ? 15 : node.type === 'folder' && node.depth === 1 ? 13 : node.type === 'folder' ? 10 : 6;
@@ -672,6 +724,7 @@ function applyGraphTransform() {
 }
 
 function zoomGraph(factor, center = null) {
+  clearTimeout(graphFitTimer);
   const rect = elements.graphCanvas.getBoundingClientRect();
   const point = center || { x: rect.width / 2, y: rect.height / 2 };
   const previous = state.graphViewport.scale;
@@ -684,6 +737,7 @@ function zoomGraph(factor, center = null) {
 }
 
 function resetGraphViewport() {
+  clearTimeout(graphFitTimer);
   state.graphViewport = { x: 0, y: 0, scale: 1 };
   if (state.graphMode) renderGraph();
   else applyGraphTransform();
@@ -691,24 +745,27 @@ function resetGraphViewport() {
 
 function setGraphMode(value) {
   state.graphMode = Boolean(value);
+  if (!state.graphMode) clearTimeout(graphFitTimer);
   if (state.graphMode) setReadingMode(false);
   elements.contentColumn.classList.toggle('is-graph', state.graphMode);
   elements.graphPanel.hidden = !state.graphMode;
   elements.graphButton.setAttribute('aria-pressed', String(state.graphMode));
-  elements.graphButton.innerHTML = state.graphMode ? '<span>▤</span> 资料列表' : '<span>◌</span> 主页图谱';
+  elements.graphButton.innerHTML = state.graphMode ? '<span>▤</span> 资料列表' : '<span>◌</span> 知识图谱';
   if (state.graphMode) requestAnimationFrame(renderGraph);
 }
 
-function openGraphHome({ record = true } = {}) {
+function openGraphHome({ record = true, preserveFilters = false } = {}) {
   state.scope = 'all';
   state.category = '';
   state.selectedId = null;
   state.selectedFolderId = null;
   state.graphFocusId = 'root';
-  state.query = '';
-  state.searchMatches = new Map();
-  state.filters = { folder: '', kinds: [], tags: [], tagMode: 'and', status: '', readingStatuses: [], favorite: 'any', scoreMin: 0, publishedFrom: '', publishedTo: '', receivedFrom: '', receivedTo: '', sort: 'received_desc' };
-  elements.search.value = '';
+  if (!preserveFilters) {
+    state.query = '';
+    state.searchMatches = new Map();
+    state.filters = { folder: '', kinds: [], tags: [], tagMode: 'and', status: '', readingStatuses: [], favorite: 'any', scoreMin: 0, publishedFrom: '', publishedTo: '', receivedFrom: '', receivedTo: '', sort: 'received_desc' };
+    elements.search.value = '';
+  }
   setGraphMode(true);
   render();
   resetGraphViewport();
@@ -724,20 +781,30 @@ function focusGraphNode(id, selectedId = null, selectedFolderId = null) {
   renderInspector();
   renderGraph();
   pushNavigation();
+  clearTimeout(graphFitTimer);
+  graphFitTimer = setTimeout(() => {
+    if (!state.graphMode || state.graphFocusId !== id) return;
+    state.graphAutoFit = true;
+    renderGraph();
+  }, 420);
 }
 
 function openGraphItem(id) {
+  const target = state.items.find(item => item.id === id);
+  if (!target) return;
+  state.scope = target.category ? 'category' : 'all';
+  state.category = target.category || '';
   state.selectedId = id;
   state.selectedFolderId = null;
   state.graphFocusId = id;
-  state.tab = state.items.find(item => item.id === id)?.reading_position?.view || 'asset';
+  state.tab = target.reading_position?.view || 'asset';
   state.notes = [];
   state.notesItemId = null;
   setGraphMode(false);
   render();
   pushNavigation();
   const item = selectedItem();
-  if (item?.kind === 'note') return openNotebook(item.id);
+  if (item?.kind === 'note') return openNotebook(item.id, { mode: 'preview' });
   if (item?.reading_status === 'unread') patchOrganization({ reading_status: 'reading', last_opened_at: new Date().toISOString() });
 }
 
@@ -764,7 +831,7 @@ async function textPreview(item, variant, token) {
   const response = await fetch(`/api/items/${item.id}/${variant}`);
   if (token !== state.renderToken) return;
   if (!response.ok) {
-    elements.viewer.innerHTML = `<div class="error-state"><p>没有可用的${variant === 'markdown' ? '知识笔记' : '正文内容'}</p><span>该资料目前没有生成对应内容</span></div>`;
+    elements.viewer.innerHTML = `<div class="error-state"><p>没有可用的${variant === 'markdown' ? '资料摘要' : '正文内容'}</p><span>该资料目前没有生成对应内容</span></div>`;
     return;
   }
   const text = await response.text();
@@ -931,7 +998,7 @@ async function renderViewer() {
     elements.readerSubtitle.textContent = '文档、图片、音频、压缩包和视频链接都可以在这里查看';
     elements.openOriginal.classList.add('is-disabled');
     elements.openOriginal.removeAttribute('href');
-    elements.viewer.innerHTML = '<div class="viewer-empty"><div class="empty-glyph">文</div><p>从上方资料列表中选择一项</p><span>原件和知识笔记会显示在这里</span></div>';
+    elements.viewer.innerHTML = '<div class="viewer-empty"><div class="empty-glyph">文</div><p>从上方资料列表中选择一项</p><span>原件和资料摘要会显示在这里</span></div>';
     return;
   }
   elements.readerKind.textContent = kindNames[item.kind] || '文件';
@@ -997,47 +1064,41 @@ function relationCandidatesFor(entity) {
 function relationListHtml(entity, editing) {
   const relations = state.relations.filter(relation => relation.source_id === entity.id || relation.target_id === entity.id);
   return `<section class="inspector-section">
-    <p class="inspector-label">双向连接</p>
+    <p class="inspector-label">连接</p>
     <div class="relation-list">${relations.length ? relations.map(relation => {
       const otherId = relation.source_id === entity.id ? relation.target_id : relation.source_id;
       const other = relationEntity(otherId);
       const type = other?.entity_type === 'folder' ? '文件夹' : other?.entity_type === 'note' ? '笔记' : '资料';
-      return `<div class="relation-row ${editing ? 'is-editing' : ''}"><span class="relation-type">${escapeHtml(relationNames[relation.type] || '相关')}</span><span class="relation-title" title="${escapeHtml(other?.title || '节点已删除')}"><small>${type}</small>${escapeHtml(other?.title || '节点已删除')}</span>${editing ? `<button class="relation-delete" data-relation-delete="${relation.id}" aria-label="删除关联">×</button>` : ''}</div>`;
+      return `<div class="relation-row ${editing ? 'is-editing' : ''}"><span class="relation-type">${escapeHtml(relationNames[relation.type] || '相关')}</span><span class="relation-title" title="${escapeHtml(other?.title || '节点已删除')}"><small>${type}</small>${escapeHtml(other?.title || '节点已删除')}</span>${editing ? `<button class="relation-delete" data-relation-delete="${relation.id}" aria-label="删除连接">×</button>` : ''}</div>`;
     }).join('') : '<span class="summary">尚未建立连接</span>'}</div>
   </section>`;
 }
 
+function pickerBreadcrumbHtml(path, kind) {
+  return `<nav class="folder-picker-breadcrumb" aria-label="当前目录">${folderBreadcrumbs(path).map((crumb, index, values) => `<button type="button" data-picker-path="${escapeHtml(crumb.path)}" data-picker-kind="${kind}" ${index === values.length - 1 ? 'aria-current="page"' : ''}>${escapeHtml(crumb.label)}</button>${index < values.length - 1 ? '<span>›</span>' : ''}`).join('')}</nav>`;
+}
+
+function relationPickerContentHtml(candidates, path = '') {
+  const currentFolder = candidates.find(candidate => candidate.entity_type === 'folder' && candidate.category === path);
+  const folders = folderPickerLevel(state.tree, path);
+  const files = candidates.filter(candidate => candidate.entity_type !== 'folder' && String(candidate.category || '') === path).sort((a, b) => a.title.localeCompare(b.title, 'zh-CN'));
+  const currentLabel = folderAtPath(state.tree, path)?.name || 'Library';
+  return `${pickerBreadcrumbHtml(path, 'relation')}
+    <div class="folder-picker-current"><span><small>当前位置</small><strong>${escapeHtml(currentLabel)}</strong></span>${currentFolder ? `<button type="button" data-relation-target="${escapeHtml(currentFolder.id)}" data-relation-kind="folder" data-relation-title="${escapeHtml(currentFolder.title)}">连接此文件夹</button>` : ''}</div>
+    <div class="folder-picker-list">
+      ${folders.map(folder => `<button class="folder-picker-row" type="button" data-picker-path="${escapeHtml(folder.path)}" data-picker-kind="relation"><span>▱ ${escapeHtml(folder.name)}</span><b>›</b></button>`).join('')}
+      ${files.map(file => `<button class="relation-file-option" type="button" data-relation-target="${escapeHtml(file.id)}" data-relation-kind="${file.entity_type}" data-relation-title="${escapeHtml(file.title)}" title="${escapeHtml(file.title)}"><small>${file.entity_type === 'note' ? '笔记' : '资料'}</small>${escapeHtml(file.title)}</button>`).join('')}
+      ${!folders.length && !files.length && !currentFolder ? '<div class="move-menu-empty">此文件夹中没有可连接的节点</div>' : ''}
+    </div>`;
+}
+
 function relationBuilderHtml(candidates, sourceEntity) {
   if (!candidates.length) return '<p class="workflow-hint">知识库中还没有其他可连接的节点。</p>';
-  const grouped = new Map();
-  for (const candidate of candidates) {
-    const parts = String(candidate.category || '').split('/').filter(Boolean);
-    const top = parts[0] || 'Library';
-    const sub = candidate.entity_type === 'folder' ? (parts.slice(1, -1).join('/') || '__folders__') : (parts.slice(1).join('/') || '__direct__');
-    if (!grouped.has(top)) grouped.set(top, new Map());
-    if (!grouped.get(top).has(sub)) grouped.get(top).set(sub, []);
-    grouped.get(top).get(sub).push(candidate);
-  }
-  const topMenus = [...grouped.entries()]
-    .sort(([a], [b]) => a.localeCompare(b, 'zh-CN'))
-    .map(([top, subgroups]) => `
-      <div class="relation-cascade-branch">
-        <button class="relation-cascade-option" type="button"><span>${escapeHtml(top)}</span><span>‹</span></button>
-        <div class="relation-cascade-menu relation-level-two">
-          ${[...subgroups.entries()].sort(([a], [b]) => a.localeCompare(b, 'zh-CN')).map(([sub, files]) => `
-            <div class="relation-cascade-branch">
-              <button class="relation-cascade-option" type="button"><span>${sub === '__direct__' ? '本级资料' : sub === '__folders__' ? '文件夹' : escapeHtml(sub)}</span><span>‹</span></button>
-              <div class="relation-cascade-menu relation-level-three">
-                ${files.sort((a, b) => a.title.localeCompare(b.title, 'zh-CN')).map(file => `<button class="relation-file-option" type="button" data-relation-target="${escapeHtml(file.id)}" data-relation-kind="${file.entity_type}" data-relation-title="${escapeHtml(file.title)}" title="${escapeHtml(file.title)}"><small>${file.entity_type === 'folder' ? '文件夹' : file.entity_type === 'note' ? '笔记' : '资料'}</small>${file.entity_type === 'folder' ? '▱ ' : ''}${escapeHtml(file.title)}</button>`).join('')}
-              </div>
-            </div>`).join('')}
-        </div>
-      </div>`).join('');
   return `
-    <div class="relation-cascade">
+    <div class="relation-cascade" data-relation-source="${escapeHtml(sourceEntity.id)}">
       <button class="relation-cascade-trigger" type="button" data-relation-cascade-toggle aria-expanded="false"><span data-relation-selection>选择文件夹、资料或笔记</span><span>⌄</span></button>
       <div class="relation-cascade-popover" data-relation-cascade-popover hidden>
-        <div class="relation-cascade-menu relation-level-one">${topMenus}</div>
+        ${relationPickerContentHtml(candidates)}
       </div>
       <div class="relation-add" data-relation-confirm hidden>
         <select id="relationType" aria-label="连接类型">${Object.entries(relationNames).map(([value, label]) => `<option value="${value}" ${value === 'belongs_to' && sourceEntity.entity_type !== 'note' ? 'hidden disabled' : ''}>${label}</option>`).join('')}</select>
@@ -1046,29 +1107,19 @@ function relationBuilderHtml(candidates, sourceEntity) {
     </div>`;
 }
 
-function folderMenuBranchHtml(nodes, { sourceFolder = '', mode = 'move' } = {}) {
-  return nodes.map(node => {
-    if (sourceFolder && (node.path === sourceFolder || node.path.startsWith(`${sourceFolder}/`))) return '';
-    const children = folderMenuBranchHtml(node.children || [], { sourceFolder, mode });
-    const attribute = mode === 'filter' ? 'data-filter-folder' : 'data-move-destination';
-    return `<div class="move-menu-branch"><button type="button" ${attribute}="${escapeHtml(node.path)}"><span>▱ ${escapeHtml(node.name)}</span>${children ? '<b class="menu-direction">›</b>' : ''}</button>${children ? `<div class="move-menu-submenu">${children}</div>` : ''}</div>`;
-  }).join('');
+function folderPickerContentHtml(path, { sourceFolder = '', mode = 'move' } = {}) {
+  const folders = folderPickerLevel(state.tree, path, sourceFolder);
+  const currentLabel = folderAtPath(state.tree, path)?.name || 'Library';
+  const action = mode === 'filter' ? '在此范围筛选' : '移动到此处';
+  const attribute = mode === 'filter' ? 'data-filter-folder' : 'data-move-destination';
+  return `${pickerBreadcrumbHtml(path, mode)}
+    <div class="folder-picker-current"><span><small>当前位置</small><strong>${escapeHtml(currentLabel)}</strong></span><button type="button" ${attribute}="${escapeHtml(path)}">${action}</button></div>
+    <div class="folder-picker-list">${folders.map(folder => `<button class="folder-picker-row" type="button" data-picker-path="${escapeHtml(folder.path)}" data-picker-kind="${mode}"><span>▱ ${escapeHtml(folder.name)}</span><b>›</b></button>`).join('') || '<div class="move-menu-empty">没有下级文件夹</div>'}</div>`;
 }
 
-function folderMenuDepth(nodes) {
-  if (!nodes?.length) return 1;
-  return 1 + Math.max(0, ...nodes.map(node => folderMenuDepth(node.children || [])));
-}
-
-function positionFolderMenu(popover, anchor, nodes) {
+function positionFolderMenu(popover, anchor) {
   const rect = anchor.getBoundingClientRect();
-  const depth = Math.min(3, folderMenuDepth(nodes));
-  const requiredWidth = 220 + (depth - 1) * 213;
-  const roomRight = window.innerWidth - rect.left - 8;
-  const roomLeft = rect.right - 8;
-  const direction = roomRight >= Math.min(requiredWidth, window.innerWidth - 16) || roomRight >= roomLeft ? 'right' : 'left';
-  popover.dataset.cascadeDirection = direction;
-  popover.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 230))}px`;
+  popover.style.left = `${Math.max(8, Math.min(rect.left, window.innerWidth - 300))}px`;
   popover.style.top = `${Math.max(8, Math.min(rect.bottom + 5, window.innerHeight - 330))}px`;
 }
 
@@ -1076,11 +1127,10 @@ function openMoveMenu(entity, anchor) {
   closeFolderFilterMenu();
   document.querySelectorAll('[data-relation-cascade-popover]').forEach(value => { value.hidden = true; });
   state.moveEntity = entity;
-  const nodes = state.tree?.children || [];
-  const branches = folderMenuBranchHtml(nodes, { sourceFolder: entity.type === 'folder' ? entity.path : '' });
-  elements.movePopover.innerHTML = `${entity.type === 'folder' ? '<button class="move-root-option" type="button" data-move-destination=""><span>⌂ Library</span></button>' : ''}<div class="move-menu-tree">${branches || '<div class="move-menu-empty">没有可用的目标文件夹</div>'}</div>`;
+  elements.movePopover.dataset.pickerPath = '';
+  elements.movePopover.innerHTML = folderPickerContentHtml('', { sourceFolder: entity.type === 'folder' ? entity.path : '', mode: 'move' });
   elements.movePopover.hidden = false;
-  positionFolderMenu(elements.movePopover, anchor, nodes);
+  positionFolderMenu(elements.movePopover, anchor);
 }
 
 function closeMoveMenu() {
@@ -1090,12 +1140,12 @@ function closeMoveMenu() {
 
 function openFolderFilterMenu() {
   closeMoveMenu();
-  const nodes = state.tree?.children || [];
-  const branches = folderMenuBranchHtml(nodes, { mode: 'filter' });
-  elements.folderFilterPopover.innerHTML = `<button class="move-root-option" type="button" data-filter-folder=""><span>⌂ Library</span></button><div class="move-menu-tree">${branches || '<div class="move-menu-empty">暂无文件夹</div>'}</div>`;
+  const path = elements.folderFilter.value || '';
+  elements.folderFilterPopover.dataset.pickerPath = path;
+  elements.folderFilterPopover.innerHTML = folderPickerContentHtml(path, { mode: 'filter' });
   elements.folderFilterPopover.hidden = false;
   elements.folderFilterButton.setAttribute('aria-expanded', 'true');
-  positionFolderMenu(elements.folderFilterPopover, elements.folderFilterButton, nodes);
+  positionFolderMenu(elements.folderFilterPopover, elements.folderFilterButton);
 }
 
 function closeFolderFilterMenu() {
@@ -1115,7 +1165,7 @@ function renderFolderInspector(folder) {
       <label class="edit-label" for="editFolderTags">标签</label>
       <input class="edit-input" id="editFolderTags" value="${escapeHtml((folder.tags || []).join('，'))}" placeholder="使用逗号分隔">
       <div class="edit-relation-block">
-        <p class="inspector-label">建立双向连接</p>
+        <p class="inspector-label">建立连接</p>
         ${relationBuilderHtml(relationCandidatesFor(entity), entity)}
       </div>
       <p class="workflow-hint">文件夹名称与位置继续通过资料列表中的“移动”操作调整，稳定 ID 和已有连接不会改变。</p>
@@ -1140,7 +1190,7 @@ function renderFolderInspector(folder) {
     </header>
     ${body}
     ${relationListHtml(entity, editing)}
-    <section class="inspector-section"><p class="inspector-label">稳定身份</p><p class="summary">文件夹改名或移动后，资料卡与双向连接会继续保留。</p></section>`;
+    <section class="inspector-section"><p class="inspector-label">稳定身份</p><p class="summary">文件夹改名或移动后，资料卡与连接会继续保留。</p></section>`;
 }
 
 async function performMove(destination) {
@@ -1157,7 +1207,7 @@ async function performMove(destination) {
     }
     state.selectedId = entity.type === 'item' ? entity.id : null;
     await load({ quiet: true });
-    showToast(entity.type === 'item' ? '资料已移动' : '文件夹已移动，双向连接保持不变');
+    showToast(entity.type === 'item' ? '资料已移动' : '文件夹已移动，连接保持不变');
   } catch (error) { showToast(error.message); }
   finally { state.busyAction = false; }
 }
@@ -1208,7 +1258,7 @@ function renderInspector() {
       <label class="edit-label" for="editTags">标签</label>
       <input class="edit-input" id="editTags" value="${escapeHtml((item.tags || []).join('，'))}" placeholder="使用逗号分隔，最多 8 个">
       <div class="edit-relation-block">
-        <p class="inspector-label">建立双向连接</p>
+        <p class="inspector-label">建立连接</p>
         ${relationBuilderHtml(relationCandidatesFor(itemEntity), itemEntity)}
       </div>
       <div class="edit-actions">
@@ -1602,11 +1652,12 @@ async function createNamedNote(title) {
 
 function notebookEditorHtml(note, content, { close = true } = {}) {
   const temporary = note.state === 'temporary';
+  const properties = note.storage === 'vault' ? vaultPropertyEditorHtml(note) : '';
   return `<header class="notebook-pane-head"><div><strong>${temporary ? '临时笔记' : linkedMaterialId(note) ? '链接笔记' : '知识笔记'}</strong><small>${temporary ? '自动保存于本地草稿区' : escapeHtml(note.category || '')}</small></div><div class="notebook-head-actions">
     ${temporary ? '<button type="button" data-notebook-submit>送入收件箱</button>' : `<a href="/api/notebook/notes/${note.id}/export/markdown">导出 MD 包</a><a href="/api/notebook/notes/${note.id}/export/pdf" target="_blank">导出 PDF</a>`}
     ${close ? '<button type="button" data-notebook-close>关闭</button>' : ''}
   </div></header><div class="notebook-editor-wrap">
-    <input class="notebook-title-input" data-notebook-title maxlength="80" value="${escapeHtml(note.title)}" aria-label="笔记标题">
+    <div class="notebook-title-area"><input class="notebook-title-input" data-notebook-title maxlength="80" value="${escapeHtml(note.title)}" aria-label="笔记标题">${properties}</div>
     <div class="notebook-toolbar" role="toolbar" aria-label="Markdown 格式工具">
       <span class="notebook-tool-group"><button type="button" data-editor-command="undo" title="撤销 Ctrl+Z">↶</button><button type="button" data-editor-command="redo" title="重做 Ctrl+Y">↷</button><button type="button" data-editor-command="search" title="查找与替换 Ctrl+F">查找</button></span>
       <span class="notebook-tool-group"><button type="button" data-editor-command="heading-2" title="二级标题 Ctrl+Alt+2">H2</button><button type="button" data-editor-command="bold" title="粗体 Ctrl+B"><strong>B</strong></button><button type="button" data-editor-command="italic" title="斜体 Ctrl+I"><em>I</em></button><button type="button" data-editor-command="link" title="链接 Ctrl+Shift+K">链接</button></span>
@@ -1614,12 +1665,95 @@ function notebookEditorHtml(note, content, { close = true } = {}) {
       <button class="notebook-outline-toggle" type="button" data-notebook-outline-toggle aria-expanded="false">大纲</button>
     </div>
     <div class="notebook-editor-stage"><div class="notebook-editor" data-notebook-editor></div><aside class="notebook-outline" data-notebook-outline hidden><header>文档大纲</header><nav data-notebook-outline-list></nav></aside></div>
-    <span class="notebook-save-status" data-notebook-save-status>已保存 · Markdown 真源</span>
+    <footer class="notebook-save-footer">
+      <span class="notebook-save-status" data-notebook-save-status data-state="saved">已保存 · Markdown 真源</span>
+      <section class="notebook-conflict" data-notebook-conflict hidden>
+        <div><strong>检测到外部修改</strong><span>当前编辑内容仍保留在编辑器中，磁盘文件尚未被覆盖。</span></div>
+        <div class="notebook-conflict-actions"><button type="button" data-conflict-copy>复制当前草稿</button><button type="button" data-conflict-compare>对比版本</button><button type="button" data-conflict-reload>重新载入磁盘版本</button></div>
+        <div class="notebook-conflict-compare" data-conflict-comparison hidden></div>
+      </section>
+    </footer>
   </div>`;
 }
 
+function vaultPropertyEditorHtml(note) {
+  const metadata = note.vault_properties || {};
+  const protectedKeys = new Set([
+    'id', 'type', 'title', 'status', 'category', 'tags', 'zotero_tags', 'agent_tags', 'created_at', 'updated_at', 'received_at',
+    'bound_item_id', 'linked_item_ids', 'linked_note_ids', 'anchor', 'summary', 'summary_basis', 'original_name', 'source_url',
+    'quality_score', 'favorite', 'reading_status', 'last_opened_at', 'reading_progress', 'reading_position', 'zotero_key', 'zotero_library',
+  ]);
+  const commonKeys = new Set(['aliases', 'manual_tags', 'citekey', 'doi', 'authors', 'year']);
+  const entries = Object.entries({ aliases: [], manual_tags: [], ...metadata })
+    .filter(([key]) => !protectedKeys.has(key));
+  const rowHtml = ([key, value]) => {
+    const type = Array.isArray(value) && value.every(item => typeof item === 'string') ? 'list'
+      : typeof value === 'boolean' ? 'boolean' : typeof value === 'number' ? 'number'
+        : typeof value === 'string' ? /^\d{4}-\d{2}-\d{2}$/.test(value) ? 'date' : 'text' : 'complex';
+    const display = type === 'list' ? value.join('，') : type === 'complex' ? JSON.stringify(value) : String(value ?? '');
+    return `<label class="vault-property-row"><span>${escapeHtml(key)} <small>${type}</small></span>${type === 'complex'
+      ? `<code title="复杂属性请编辑 Markdown 文件中的 YAML">${escapeHtml(display)}</code>`
+      : type === 'boolean' ? `<input data-vault-property="${escapeHtml(key)}" data-property-type="boolean" type="checkbox" ${value ? 'checked' : ''}>`
+        : `<input data-vault-property="${escapeHtml(key)}" data-property-type="${type}" type="${type === 'date' ? 'date' : type === 'number' ? 'number' : 'text'}" value="${escapeHtml(display)}">`}</label>`;
+  };
+  const common = entries.filter(([key]) => commonKeys.has(key));
+  const advanced = entries.filter(([key]) => !commonKeys.has(key));
+  return `<details class="vault-properties"><summary>常用属性 <small>与 Obsidian YAML 同步</small></summary>
+    <div class="vault-property-list">${common.map(rowHtml).join('')}</div>
+    ${advanced.length ? `<details class="vault-property-advanced"><summary>更多属性 · ${advanced.length}</summary><div>${advanced.map(rowHtml).join('')}</div></details>` : ''}
+    <div class="vault-property-new"><input data-new-property-key placeholder="新属性名" aria-label="新属性名"><input data-new-property-value placeholder="属性值" aria-label="新属性值"><button type="button" data-add-vault-property>添加</button></div>
+  </details>`;
+}
+
+function readVaultProperties() {
+  const properties = {};
+  for (const input of elements.notebookWorkspace.querySelectorAll('[data-vault-property]')) {
+    const type = input.dataset.propertyType;
+    properties[input.dataset.vaultProperty] = type === 'boolean' ? input.checked
+      : type === 'number' ? Number(input.value)
+        : type === 'list' ? input.value.split(/[，,]/).map(value => value.trim()).filter(Boolean) : input.value;
+  }
+  return properties;
+}
+
 function notebookPreviewHtml(note, content, { close = false, edit = false } = {}) {
-  return `<header class="notebook-pane-head"><div><strong>${escapeHtml(note.title || 'Markdown 预览')}</strong><small>${linkedMaterialId(note) ? '与原资料双向链接' : 'Markdown 预览 · 图片随笔记保存在本地'}</small></div><div class="notebook-head-actions">${edit ? '<button type="button" data-notebook-edit>编辑</button>' : ''}${close ? '<button type="button" data-notebook-close>关闭</button>' : ''}</div></header><div class="notebook-preview"><article>${renderMarkdownHtml(content, { assetUrl: name => `/api/notebook/notes/${note.id}/assets/${encodeURIComponent(name)}` }) || '<p>这篇笔记还没有正文。</p>'}</article></div>`;
+  return `<header class="notebook-pane-head"><div><strong>${escapeHtml(note.title || 'Markdown 预览')}</strong><small>${linkedMaterialId(note) ? '与原资料双向链接' : 'Markdown 预览 · 图片随笔记保存在本地'}</small></div><div class="notebook-head-actions">${edit ? '<button type="button" data-notebook-edit>编辑</button>' : ''}${close ? '<button type="button" data-notebook-close>关闭</button>' : ''}</div></header><div class="notebook-preview"><article>${notebookMarkdownHtml(note, content) || '<p>这篇笔记还没有正文。</p>'}</article><div class="vault-link-summary" data-vault-link-summary></div></div>`;
+}
+
+function notebookMarkdownHtml(note, content, { allowEmbeds = true } = {}) {
+  return renderMarkdownHtml(content, {
+    assetUrl: name => `/api/notebook/notes/${note.id}/assets/${encodeURIComponent(name)}`,
+    wikiLink: target => resolveVaultTarget(target, state.items.filter(item => item.storage === 'vault'), note.id),
+    allowEmbeds,
+  });
+}
+
+function renderVaultLinkSummary() {
+  for (const panel of elements.notebookWorkspace.querySelectorAll('[data-vault-link-summary]')) {
+    const links = state.activeNotebookLinks;
+    if (!links) { panel.innerHTML = ''; continue; }
+    const group = (label, notes) => `<div><strong>${label} · ${notes.length}</strong>${notes.length
+      ? notes.map(note => `<button type="button" data-wiki-note="${escapeHtml(note.id)}">${escapeHtml(note.title)}</button>`).join('')
+      : '<span>暂无</span>'}</div>`;
+    panel.innerHTML = group('正文链接', links.outgoing) + group('链接到此笔记', links.backlinks);
+  }
+}
+
+async function hydrateWikiEmbeds() {
+  for (const placeholder of elements.notebookWorkspace.querySelectorAll('[data-wiki-embed]:not([data-wiki-loaded])')) {
+    placeholder.dataset.wikiLoaded = '1';
+    const id = placeholder.dataset.wikiEmbed;
+    try {
+      const record = await api(`/api/notebook/notes/${encodeURIComponent(id)}`);
+      if (!placeholder.isConnected) continue;
+      const embed = document.createElement('aside');
+      embed.className = 'wiki-embed-card';
+      embed.innerHTML = `<strong>${escapeHtml(record.note.title)}</strong><div>${notebookMarkdownHtml(record.note, record.content, { allowEmbeds: false })}</div>`;
+      placeholder.replaceWith(embed);
+    } catch {
+      if (placeholder.isConnected) placeholder.textContent = '嵌入笔记暂时不可用';
+    }
+  }
 }
 
 function renderNotebookOutline(outline = []) {
@@ -1632,11 +1766,13 @@ function renderNotebookOutline(outline = []) {
 
 function renderNotebookPreview() {
   if (!state.activeNotebook) return;
-  const html = renderMarkdownHtml(state.notebookContent, { assetUrl: name => `/api/notebook/notes/${state.activeNotebook.id}/assets/${encodeURIComponent(name)}` }) || '<p>开始书写后，这里会实时显示排版结果。</p>';
+  const html = notebookMarkdownHtml(state.activeNotebook, state.notebookContent) || '<p>开始书写后，这里会实时显示排版结果。</p>';
   for (const preview of elements.notebookWorkspace.querySelectorAll('.notebook-preview article')) {
     preview.innerHTML = html;
     renderMathIn(preview);
   }
+  renderVaultLinkSummary();
+  hydrateWikiEmbeds();
 }
 
 function mountNotebookEditor() {
@@ -1660,6 +1796,7 @@ async function renderNotebookWorkspace() {
   const active = state.activeNotebook;
   if (!active) { elements.notebookWorkspace.hidden = true; return; }
   elements.notebookWorkspace.hidden = false;
+  elements.notebookWorkspace.classList.toggle('is-preview-only', !linkedMaterialId(active) && state.notebookMode === 'preview');
   if (linkedMaterialId(active)) {
     const source = state.items.find(item => item.id === linkedMaterialId(active));
     const editActions = state.notebookMode === 'edit' ? '<button type="button" data-notebook-toggle-preview>预览笔记</button>' : '';
@@ -1675,8 +1812,13 @@ async function renderNotebookWorkspace() {
       : notebookEditorHtml(active, state.notebookContent, { close: false });
     await restoreReadingPosition(source);
   } else {
-    elements.notebookLeft.innerHTML = notebookEditorHtml(active, state.notebookContent);
-    elements.notebookRight.innerHTML = notebookPreviewHtml(active, state.notebookContent);
+    if (state.notebookMode === 'preview') {
+      elements.notebookLeft.innerHTML = notebookPreviewHtml(active, state.notebookContent, { close: true, edit: true });
+      elements.notebookRight.innerHTML = '';
+    } else {
+      elements.notebookLeft.innerHTML = notebookEditorHtml(active, state.notebookContent);
+      elements.notebookRight.innerHTML = notebookPreviewHtml(active, state.notebookContent);
+    }
   }
   if (state.notebookMode === 'edit') mountNotebookEditor();
   else { state.notebookEditor?.destroy(); state.notebookEditor = null; }
@@ -1693,8 +1835,9 @@ async function toggleNotebookSourcePreview() {
   if (source) source.hidden = state.notebookPreview;
   if (preview) {
     preview.hidden = !state.notebookPreview;
-    preview.querySelector('article').innerHTML = renderMarkdownHtml(state.notebookContent, { assetUrl: name => `/api/notebook/notes/${state.activeNotebook.id}/assets/${encodeURIComponent(name)}` }) || '<p>开始书写后，这里会显示排版结果。</p>';
+    preview.querySelector('article').innerHTML = notebookMarkdownHtml(state.activeNotebook, state.notebookContent) || '<p>开始书写后，这里会显示排版结果。</p>';
     renderMathIn(preview);
+    hydrateWikiEmbeds();
   }
   if (button) button.textContent = state.notebookPreview ? '返回原资料' : '预览笔记';
   if (!state.notebookPreview) await restoreReadingPosition(selectedItem());
@@ -1727,11 +1870,13 @@ async function openNotebook(id, { mode = 'edit' } = {}) {
       }
     }
     state.activeNotebook = record.note;
+    state.activeNotebookLinks = record.note.storage === 'vault' ? await api(`/api/notebook/notes/${id}/links`).catch(() => null) : null;
     state.notebookContent = record.content || '';
     state.notebookMode = mode === 'preview' ? 'preview' : 'edit';
     state.notebookPreview = false;
     await renderNotebookWorkspace();
     if (state.notebookMode === 'edit') requestAnimationFrame(() => state.notebookEditor?.focus());
+    return record;
   } catch (error) { showToast(error.message); }
 }
 
@@ -1739,7 +1884,7 @@ async function closeNotebook() {
   clearTimeout(state.notebookSaveTimer);
   if (state.activeNotebook && state.notebookMode === 'edit') {
     try { await persistActiveNotebook(); }
-    catch (error) { showToast(error.message); return; }
+    catch (error) { await handleNotebookSaveFailure(error); return; }
   }
   if (linkedMaterialId(state.activeNotebook)) await saveReadingPosition({ immediate: true }).catch(error => showToast(error.message));
   if (state.notebookReaderPlaceholder?.isConnected) state.notebookReaderPlaceholder.replaceWith(elements.reader);
@@ -1749,6 +1894,8 @@ async function closeNotebook() {
   state.notebookEditor?.destroy();
   state.notebookEditor = null;
   state.activeNotebook = null;
+  state.activeNotebookLinks = null;
+  state.notebookConflict = null;
   state.notebookContent = '';
   state.notebookMode = 'edit';
   state.notebookPreview = false;
@@ -1765,13 +1912,14 @@ async function persistActiveNotebook() {
   const noteId = state.activeNotebook.id;
   const save = async () => {
     if (state.activeNotebook?.id !== noteId) return;
-    const status = elements.notebookWorkspace.querySelector('[data-notebook-save-status]');
-    if (status) status.textContent = '保存中…';
+    setNotebookSaveStatus('保存中…', 'saving');
     const title = elements.notebookWorkspace.querySelector('[data-notebook-title]')?.value.trim() || '未命名笔记';
     const content = state.notebookEditor?.getValue() ?? state.notebookContent;
     const saved = await api(`/api/notebook/notes/${noteId}`, {
       method: 'PATCH', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ title, content, ...(state.activeNotebook.vault_revision ? { expected_revision: state.activeNotebook.vault_revision } : {}) }),
+      body: JSON.stringify({ title, content,
+        ...(state.activeNotebook.storage === 'vault' ? { properties: readVaultProperties() } : {}),
+        ...(state.activeNotebook.vault_revision ? { expected_revision: state.activeNotebook.vault_revision } : {}) }),
     });
     if (state.activeNotebook?.id !== noteId) return saved;
     state.activeNotebook = { ...state.activeNotebook, ...saved, title };
@@ -1780,8 +1928,22 @@ async function persistActiveNotebook() {
     if (item) Object.assign(item, state.activeNotebook);
     const temporary = state.temporaryNotes.find(value => value.id === noteId);
     if (temporary) Object.assign(temporary, state.activeNotebook);
+    state.notebookConflict = null;
     const currentStatus = elements.notebookWorkspace.querySelector('[data-notebook-save-status]');
-    if (currentStatus) currentStatus.textContent = '已保存 · Markdown 真源 · 可粘贴图片';
+    if (currentStatus) {
+      currentStatus.textContent = '已保存 · Markdown 真源 · 可粘贴图片';
+      currentStatus.dataset.state = 'saved';
+    }
+    const conflict = elements.notebookWorkspace.querySelector('[data-notebook-conflict]');
+    if (conflict) conflict.hidden = true;
+    if (saved.storage === 'vault') {
+      const [links, graphLinks] = await Promise.all([
+        api(`/api/notebook/notes/${noteId}/links`).catch(() => null),
+        api('/api/vault/links').catch(() => state.markdownLinks),
+      ]);
+      state.activeNotebookLinks = links;
+      state.markdownLinks = graphLinks;
+    }
     renderNotebookPreview();
     return saved;
   };
@@ -1792,11 +1954,34 @@ async function persistActiveNotebook() {
   finally { if (state.notebookSaveChain === queued) state.notebookSaveChain = null; }
 }
 
+function setNotebookSaveStatus(message, status = 'saved') {
+  const element = elements.notebookWorkspace.querySelector('[data-notebook-save-status]');
+  if (!element) return;
+  element.textContent = message;
+  element.dataset.state = status;
+}
+
+async function handleNotebookSaveFailure(error) {
+  if (error.code !== 'VAULT_WRITE_CONFLICT' || !state.activeNotebook) {
+    setNotebookSaveStatus('保存失败 · 请检查后重试', 'error');
+    showToast(error.message);
+    return;
+  }
+  setNotebookSaveStatus('保存冲突 · 当前草稿未丢失', 'conflict');
+  try {
+    const record = await api(`/api/notebook/notes/${state.activeNotebook.id}`);
+    state.notebookConflict = { draft: state.notebookEditor?.getValue() ?? state.notebookContent, disk: record.content || '', note: record.note };
+  } catch {
+    state.notebookConflict = { draft: state.notebookEditor?.getValue() ?? state.notebookContent, disk: '', note: null };
+  }
+  const conflict = elements.notebookWorkspace.querySelector('[data-notebook-conflict]');
+  if (conflict) conflict.hidden = false;
+}
+
 function scheduleNotebookSave() {
   clearTimeout(state.notebookSaveTimer);
-  const status = elements.notebookWorkspace.querySelector('[data-notebook-save-status]');
-  if (status) status.textContent = '保存中…';
-  state.notebookSaveTimer = setTimeout(() => persistActiveNotebook().catch(error => { if (status) status.textContent = '保存失败'; showToast(error.message); }), 450);
+  setNotebookSaveStatus('有未保存更改', 'dirty');
+  state.notebookSaveTimer = setTimeout(() => persistActiveNotebook().catch(handleNotebookSaveFailure), 450);
 }
 
 async function uploadNotebookImage(file) {
@@ -1860,6 +2045,91 @@ function showToast(message) {
   elements.toast.classList.add('is-visible');
   clearTimeout(showToast.timer);
   showToast.timer = setTimeout(() => elements.toast.classList.remove('is-visible'), 1800);
+}
+
+async function openZoteroDialog() {
+  elements.zoteroDialog.hidden = false;
+  elements.zoteroStatus.textContent = '正在连接 Zotero…';
+  elements.zoteroCollections.innerHTML = '';
+  elements.zoteroItems.innerHTML = '';
+  elements.zoteroDetail.innerHTML = '<p>选择文献查看资料与附件。</p>';
+  try {
+    const status = await api('/api/zotero/status');
+    if (!status.connected) { elements.zoteroStatus.textContent = status.reason || 'Zotero 未连接'; return; }
+    elements.zoteroStatus.textContent = '已连接 · 只读访问 Zotero';
+    const collections = [];
+    for (let start = 0; start < 1000; start += 100) {
+      const page = await api(`/api/zotero/collections?start=${start}&limit=100`);
+      collections.push(...page);
+      if (page.length < 100) break;
+    }
+    elements.zoteroCollections.innerHTML = `<button type="button" data-zotero-collection="" class="is-active">全部文献</button>${collections.map(entry => {
+      const data = entry.data || entry;
+      return `<button type="button" data-zotero-collection="${escapeHtml(data.key)}">${escapeHtml(data.name || data.key)}</button>`;
+    }).join('')}`;
+    state.zoteroCollectionKey = null;
+    state.zoteroStart = 0;
+    await loadZoteroItems();
+  } catch (error) { elements.zoteroStatus.textContent = error.message; }
+}
+
+async function loadZoteroItems() {
+  const collection = state.zoteroCollectionKey ? `&collection_key=${encodeURIComponent(state.zoteroCollectionKey)}` : '';
+  elements.zoteroItems.innerHTML = '<p>正在读取文献…</p>';
+  try {
+    state.zoteroItems = await api(`/api/zotero/items?start=${state.zoteroStart}&limit=50${collection}`);
+    elements.zoteroItems.innerHTML = state.zoteroItems.length ? state.zoteroItems.map(entry => {
+      const data = entry.data || entry;
+      return `<button type="button" data-zotero-item="${escapeHtml(data.key)}" class="${data.key === state.zoteroSelectedKey ? 'is-active' : ''}"><strong>${escapeHtml(data.title || '未命名文献')}</strong><small>${escapeHtml(data.date || '')} · ${escapeHtml(data.itemType || '')}</small></button>`;
+    }).join('') : '<p>当前分类没有文献。</p>';
+    elements.zoteroPage.textContent = String(Math.floor(state.zoteroStart / 50) + 1);
+    elements.zoteroPrev.disabled = state.zoteroStart === 0;
+    elements.zoteroNext.disabled = state.zoteroItems.length < 50;
+  } catch (error) { elements.zoteroItems.innerHTML = `<p>${escapeHtml(error.message)}</p>`; }
+}
+
+async function showZoteroItem(key) {
+  state.zoteroSelectedKey = key;
+  elements.zoteroItems.querySelectorAll('[data-zotero-item]').forEach(button => button.classList.toggle('is-active', button.dataset.zoteroItem === key));
+  elements.zoteroDetail.innerHTML = '<p>正在读取条目与子条目…</p>';
+  try {
+    const [entry, children, annotations] = await Promise.all([
+      api(`/api/zotero/items/${key}`), api(`/api/zotero/items/${key}/children?limit=100`), api(`/api/zotero/items/${key}/annotations`).catch(() => []),
+    ]);
+    if (state.zoteroSelectedKey !== key) return;
+    const data = entry.data || entry;
+    const authors = (data.creators || []).map(value => value.name || [value.firstName, value.lastName].filter(Boolean).join(' ')).filter(Boolean);
+    const counts = { attachment: 0, note: 0, annotation: 0 };
+    children.forEach(value => { const type = (value.data || value).itemType; if (type in counts) counts[type] += 1; });
+    counts.annotation = annotations.length;
+    const childRows = children.filter(value => ['attachment', 'note'].includes((value.data || value).itemType)).map(value => {
+      const child = value.data || value;
+      const isPdf = child.itemType === 'attachment' && child.contentType === 'application/pdf';
+      const label = child.itemType === 'note' ? '笔记' : '附件';
+      const text = child.title || child.filename || (child.note || '').replace(/<[^>]*>/g, '').slice(0, 120) || child.key;
+      return `<li><small>${label}</small> ${isPdf ? `<a href="zotero://open-pdf/library/items/${escapeHtml(child.key)}">${escapeHtml(text)}</a>` : escapeHtml(text)}</li>`;
+    }).join('');
+    const annotationRows = annotations.slice(0, 20).map(value => {
+      const annotation = value.data || value;
+      return `<li>${escapeHtml((annotation.annotationText || annotation.annotationComment || '').slice(0, 220) || '批注')}</li>`;
+    }).join('');
+    elements.zoteroDetail.innerHTML = `<h4>${escapeHtml(data.title || '未命名文献')}</h4>
+      <dl><dt>作者</dt><dd>${escapeHtml(authors.join('、') || '未知')}</dd><dt>日期</dt><dd>${escapeHtml(data.date || '未知')}</dd><dt>DOI</dt><dd>${escapeHtml(data.DOI || '无')}</dd><dt>标签</dt><dd>${escapeHtml((data.tags || []).map(value => value.tag).join('、') || '无')}</dd></dl>
+      <p>${escapeHtml(data.abstractNote || '没有摘要')}</p>
+      <div class="zotero-child-count">附件 ${counts.attachment} · 笔记 ${counts.note} · 批注 ${counts.annotation}</div>
+      ${childRows ? `<h5>附件与笔记</h5><ul>${childRows}</ul>` : ''}${annotationRows ? `<h5>批注摘录</h5><ul>${annotationRows}</ul>` : ''}
+      <div class="zotero-detail-actions"><a href="zotero://select/library/items/${escapeHtml(key)}">在 Zotero 中打开</a>${['attachment', 'note', 'annotation'].includes(data.itemType) ? '' : `<button type="button" data-zotero-create-note="${escapeHtml(key)}">生成 Markdown 文献笔记</button>`}</div>`;
+  } catch (error) { elements.zoteroDetail.innerHTML = `<p>${escapeHtml(error.message)}</p>`; }
+}
+
+async function createZoteroNote(key) {
+  try {
+    const note = await api(`/api/zotero/items/${key}/literature-note`, { method: 'POST' });
+    elements.zoteroDialog.hidden = true;
+    await load({ quiet: true });
+    await openNotebook(note.id);
+    showToast('文献笔记已保存在 Vault');
+  } catch (error) { showToast(error.message); }
 }
 
 async function uploadInboxFiles(fileList) {
@@ -1957,7 +2227,7 @@ async function addRelation() {
     await api('/api/relations', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ source_id: entity.id, target_id: targetId, type }) });
     await load({ quiet: true });
     if (state.readingMode) renderNotes();
-    showToast(type === 'belongs_to' ? '笔记所属关系已建立' : '双向连接已建立');
+    showToast(type === 'belongs_to' ? '笔记所属关系已建立' : '连接已建立');
   } catch (error) { showToast(error.message); }
 }
 
@@ -2241,7 +2511,7 @@ async function processInbox() {
 
 async function load({ quiet = false } = {}) {
   try {
-    const [healthResult, itemsResult, treeResult, folderRecordsResult, inboxResult, viewsResult, relationsResult, historyResult, temporaryNotesResult] = await Promise.allSettled([api('/health'), api('/api/items'), api('/api/library/tree'), api('/api/library/folder-records'), api('/api/inbox'), api('/api/views'), api('/api/relations'), api('/api/restructure/history'), api('/api/notebook/temporary')]);
+    const [healthResult, itemsResult, treeResult, folderRecordsResult, inboxResult, viewsResult, relationsResult, historyResult, temporaryNotesResult, markdownLinksResult] = await Promise.allSettled([api('/health'), api('/api/items'), api('/api/library/tree'), api('/api/library/folder-records'), api('/api/inbox'), api('/api/views'), api('/api/relations'), api('/api/restructure/history'), api('/api/notebook/temporary'), api('/api/vault/links')]);
     if (itemsResult.status === 'rejected') throw itemsResult.reason;
     if (treeResult.status === 'rejected') throw treeResult.reason;
     state.items = itemsResult.value;
@@ -2253,6 +2523,7 @@ async function load({ quiet = false } = {}) {
     state.inboxFiles = state.inboxAvailable ? inboxResult.value : [];
     state.savedViews = viewsResult.status === 'fulfilled' ? viewsResult.value : [];
     state.relations = relationsResult.status === 'fulfilled' ? relationsResult.value : [];
+    state.markdownLinks = markdownLinksResult.status === 'fulfilled' ? markdownLinksResult.value : [];
     state.restructureHistory = historyResult.status === 'fulfilled' ? historyResult.value : [];
     state.temporaryNotes = temporaryNotesResult.status === 'fulfilled' ? temporaryNotesResult.value : [];
     elements.statusDot.className = 'status-dot is-online';
@@ -2273,6 +2544,35 @@ async function load({ quiet = false } = {}) {
 }
 
 document.addEventListener('click', async event => {
+  document.querySelectorAll('.row-action-menu[open]').forEach(menu => {
+    if (!menu.contains(event.target)) menu.removeAttribute('open');
+  });
+  const clearFilter = event.target.closest('[data-clear-filter]');
+  if (clearFilter) {
+    const key = clearFilter.dataset.clearFilter;
+    const value = clearFilter.dataset.clearFilterValue;
+    if (key === 'query') {
+      state.query = '';
+      state.searchMatches = new Map();
+      elements.search.value = '';
+    } else if (Array.isArray(state.filters[key])) {
+      state.filters[key] = state.filters[key].filter(entry => entry !== value);
+    } else {
+      const defaults = { folder: '', status: '', favorite: 'any', scoreMin: 0, publishedFrom: '', publishedTo: '', receivedFrom: '', receivedTo: '', sort: 'received_desc' };
+      state.filters[key] = defaults[key];
+    }
+    renderFilterPanel();
+    render();
+    pushNavigation();
+    return;
+  }
+  if (event.target.closest('[data-clear-all-filters]')) {
+    state.query = '';
+    state.searchMatches = new Map();
+    elements.search.value = '';
+    resetFilters();
+    return;
+  }
   if (state.libraryCreateMenuOpen && !event.target.closest('[data-library-create-toggle], .library-create-menu')) {
     state.libraryCreateMenuOpen = false;
     elements.tree.querySelector('.library-create-menu')?.remove();
@@ -2351,6 +2651,7 @@ document.addEventListener('click', async event => {
   const moveItem = event.target.closest('[data-move-item]');
   if (moveItem) {
     event.stopPropagation();
+    moveItem.closest('details')?.removeAttribute('open');
     const item = state.items.find(value => value.id === moveItem.dataset.moveItem);
     if (item) openMoveMenu({ type: 'item', id: item.id, title: item.title }, moveItem);
     return;
@@ -2358,7 +2659,26 @@ document.addEventListener('click', async event => {
   const moveFolderButton = event.target.closest('[data-move-folder]');
   if (moveFolderButton) {
     event.stopPropagation();
+    moveFolderButton.closest('details')?.removeAttribute('open');
     openMoveMenu({ type: 'folder', path: moveFolderButton.dataset.moveFolder }, moveFolderButton);
+    return;
+  }
+  const pickerPath = event.target.closest('[data-picker-path]');
+  if (pickerPath) {
+    const path = pickerPath.dataset.pickerPath || '';
+    const kind = pickerPath.dataset.pickerKind;
+    if (kind === 'move') {
+      elements.movePopover.dataset.pickerPath = path;
+      elements.movePopover.innerHTML = folderPickerContentHtml(path, { sourceFolder: state.moveEntity?.type === 'folder' ? state.moveEntity.path : '', mode: 'move' });
+    } else if (kind === 'filter') {
+      elements.folderFilterPopover.dataset.pickerPath = path;
+      elements.folderFilterPopover.innerHTML = folderPickerContentHtml(path, { mode: 'filter' });
+    } else if (kind === 'relation') {
+      const cascade = pickerPath.closest('.relation-cascade');
+      const source = relationEntity(cascade?.dataset.relationSource);
+      const popover = cascade?.querySelector('[data-relation-cascade-popover]');
+      if (source && popover) popover.innerHTML = relationPickerContentHtml(relationCandidatesFor(source), path);
+    }
     return;
   }
   const moveDestination = event.target.closest('[data-move-destination]');
@@ -2382,6 +2702,7 @@ document.addEventListener('click', async event => {
     return;
   }
   if (!event.target.closest('#folderFilterPopover')) closeFolderFilterMenu();
+  if (event.target.closest('.row-action-menu')) return;
   const openFolder = event.target.closest('[data-open-folder]');
   if (openFolder) {
     state.scope = 'category';
@@ -2405,11 +2726,6 @@ document.addEventListener('click', async event => {
     document.querySelectorAll('[data-relation-cascade-popover]').forEach(value => { value.hidden = true; });
     popover.hidden = !opening;
     relationCascadeToggle.setAttribute('aria-expanded', String(opening));
-    if (opening) {
-      const rect = relationCascadeToggle.getBoundingClientRect();
-      popover.style.left = `${Math.max(8, rect.left)}px`;
-      popover.style.top = `${Math.max(8, Math.min(rect.bottom + 4, window.innerHeight - 280))}px`;
-    }
     return;
   }
   const relationTarget = event.target.closest('[data-relation-target]');
@@ -2559,7 +2875,7 @@ document.addEventListener('click', async event => {
   const row = event.target.closest('[data-id]');
   if (row) {
     const chosen = state.items.find(item => item.id === row.dataset.id);
-    if (chosen?.kind === 'note') { openNotebook(chosen.id); return; }
+    if (chosen?.kind === 'note') { openNotebook(chosen.id, { mode: 'preview' }); return; }
     await saveReadingPosition({ immediate: true }).catch(() => {});
     state.selectedId = row.dataset.id;
     state.selectedFolderId = null;
@@ -2601,23 +2917,13 @@ document.addEventListener('click', async event => {
     return;
   }
   const notebookOpen = event.target.closest('[data-open-notebook]');
-  if (notebookOpen) { openNotebook(notebookOpen.dataset.openNotebook); return; }
+  if (notebookOpen) { openNotebook(notebookOpen.dataset.openNotebook, { mode: 'preview' }); return; }
   const noteConvert = event.target.closest('[data-note-convert]');
   if (noteConvert) { event.stopPropagation(); convertSticky(noteConvert.dataset.noteConvert); return; }
   const noteDelete = event.target.closest('[data-note-delete]');
   if (noteDelete) {
     deleteNote(noteDelete.dataset.noteDelete).catch(error => showToast(error.message));
   }
-});
-
-elements.sidebarToggle.addEventListener('click', () => {
-  state.sidebarCollapsed = !state.sidebarCollapsed;
-  elements.workspace.classList.toggle('sidebar-collapsed', state.sidebarCollapsed);
-  elements.sidebarToggle.classList.toggle('is-collapsed', state.sidebarCollapsed);
-  elements.sidebarToggle.textContent = state.sidebarCollapsed ? '›' : '‹';
-  elements.sidebarToggle.setAttribute('aria-label', state.sidebarCollapsed ? '展开左侧栏' : '收起左侧栏');
-  elements.sidebarToggle.title = state.sidebarCollapsed ? '展开左侧栏' : '收起左侧栏';
-  setTimeout(layoutNotes, 300);
 });
 
 elements.inboxChooseButton.addEventListener('click', () => elements.inboxFileInput.click());
@@ -2643,9 +2949,65 @@ elements.noteNameDialog.addEventListener('click', event => {
   if (event.target === elements.noteNameDialog || event.target.closest('[data-note-name-cancel]')) { closeNoteNameDialog(); setLinkedNotebookOpen(false); }
 });
 elements.notebookWorkspace.addEventListener('input', event => {
-  if (event.target.matches('[data-notebook-title]')) scheduleNotebookSave();
+  if (event.target.matches('[data-notebook-title], [data-vault-property]')) scheduleNotebookSave();
 });
 elements.notebookWorkspace.addEventListener('click', async event => {
+  if (event.target.closest('[data-conflict-copy]')) {
+    try {
+      await navigator.clipboard.writeText(state.notebookConflict?.draft || state.notebookContent || '');
+      showToast('当前草稿已复制');
+    } catch { showToast('无法访问剪贴板，请在编辑器中手动复制'); }
+    return;
+  }
+  if (event.target.closest('[data-conflict-compare]')) {
+    const panel = elements.notebookWorkspace.querySelector('[data-conflict-comparison]');
+    if (!panel || !state.notebookConflict) return;
+    panel.hidden = !panel.hidden;
+    panel.innerHTML = panel.hidden ? '' : `<section><strong>当前草稿</strong><pre>${escapeHtml(state.notebookConflict.draft)}</pre></section><section><strong>磁盘版本</strong><pre>${escapeHtml(state.notebookConflict.disk)}</pre></section>`;
+    return;
+  }
+  if (event.target.closest('[data-conflict-reload]')) {
+    if (!state.notebookConflict?.note || !window.confirm('重新载入会放弃当前编辑器中的未保存内容，是否继续？')) return;
+    state.activeNotebook = state.notebookConflict.note;
+    state.notebookContent = state.notebookConflict.disk;
+    state.notebookConflict = null;
+    await renderNotebookWorkspace();
+    showToast('已载入磁盘中的最新版本');
+    return;
+  }
+  const wiki = event.target.closest('[data-wiki-note]');
+  if (wiki) {
+    event.preventDefault();
+    const id = wiki.dataset.wikiNote;
+    const heading = wiki.dataset.wikiHeading;
+    if (id !== state.activeNotebook?.id) {
+      clearTimeout(state.notebookSaveTimer);
+      try { await persistActiveNotebook(); }
+      catch (error) { showToast(error.message); return; }
+      await openNotebook(id, { mode: 'preview' });
+    }
+    if (heading) requestAnimationFrame(() => {
+      const preview = elements.notebookWorkspace.querySelector('.notebook-preview article');
+      const target = [...(preview?.querySelectorAll('h1,h2,h3,h4,h5,h6') || [])].find(node => node.id === headingSlug(heading));
+      target?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    });
+    return;
+  }
+  if (event.target.closest('[data-add-vault-property]')) {
+    const panel = event.target.closest('.vault-properties');
+    const keyInput = panel?.querySelector('[data-new-property-key]');
+    const valueInput = panel?.querySelector('[data-new-property-value]');
+    const key = keyInput?.value.trim();
+    if (!/^[A-Za-z][A-Za-z0-9_-]{0,63}$/.test(key || '') || panel.querySelector(`[data-vault-property="${CSS.escape(key || '')}"]`)) return showToast('属性名需以字母开头，且不能重复');
+    const row = document.createElement('label');
+    row.className = 'vault-property-row';
+    row.innerHTML = `<span>${escapeHtml(key)} <small>text</small></span><input data-vault-property="${escapeHtml(key)}" data-property-type="text" type="text" value="${escapeHtml(valueInput.value)}">`;
+    panel.querySelector('.vault-property-list').append(row);
+    keyInput.value = '';
+    valueInput.value = '';
+    scheduleNotebookSave();
+    return;
+  }
   if (event.target.closest('[data-notebook-close]')) return closeNotebook();
   if (event.target.closest('[data-notebook-submit]')) return submitActiveNotebook();
   if (event.target.closest('[data-notebook-edit]')) return editActiveNotebook();
@@ -2670,6 +3032,7 @@ elements.notebookWorkspace.addEventListener('click', async event => {
 });
 document.addEventListener('keydown', event => {
   if (event.key !== 'Escape') return;
+  if (!elements.zoteroDialog.hidden) elements.zoteroDialog.hidden = true;
   if (!elements.urlImportDialog.hidden) closeUrlImportDialog();
   if (!elements.noteNameDialog.hidden) { closeNoteNameDialog(); setLinkedNotebookOpen(false); }
   if (state.linkedNotebookOpen) setLinkedNotebookOpen(false);
@@ -2680,6 +3043,27 @@ document.addEventListener('keydown', event => {
     renderBookmarks();
   }
 });
+elements.zoteroButton.addEventListener('click', openZoteroDialog);
+elements.zoteroClose.addEventListener('click', () => { elements.zoteroDialog.hidden = true; });
+elements.zoteroDialog.addEventListener('click', event => {
+  if (event.target === elements.zoteroDialog) { elements.zoteroDialog.hidden = true; return; }
+  const collection = event.target.closest('[data-zotero-collection]');
+  if (collection) {
+    state.zoteroCollectionKey = collection.dataset.zoteroCollection || null;
+    state.zoteroStart = 0;
+    state.zoteroSelectedKey = null;
+    elements.zoteroDetail.innerHTML = '<p>选择文献查看资料与附件。</p>';
+    elements.zoteroCollections.querySelectorAll('button').forEach(button => button.classList.toggle('is-active', button === collection));
+    loadZoteroItems();
+    return;
+  }
+  const item = event.target.closest('[data-zotero-item]');
+  if (item) { showZoteroItem(item.dataset.zoteroItem); return; }
+  const create = event.target.closest('[data-zotero-create-note]');
+  if (create) createZoteroNote(create.dataset.zoteroCreateNote);
+});
+elements.zoteroPrev.addEventListener('click', () => { state.zoteroStart = Math.max(0, state.zoteroStart - 50); loadZoteroItems(); });
+elements.zoteroNext.addEventListener('click', () => { state.zoteroStart += 50; loadZoteroItems(); });
 for (const eventName of ['dragenter', 'dragover']) {
   elements.inboxDropzone.addEventListener(eventName, event => {
     event.preventDefault();
@@ -2858,26 +3242,10 @@ document.addEventListener('change', event => {
   if (event.target.matches('[data-reading-status]')) patchOrganization({ reading_status: event.target.value, last_opened_at: new Date().toISOString() }, `已设为${readingNames[event.target.value]}`);
 });
 
-document.addEventListener('pointerover', event => {
-  const moveOption = event.target.closest('.move-menu-branch > button');
-  const moveSubmenu = moveOption?.nextElementSibling;
-  if (moveSubmenu?.matches('.move-menu-submenu')) {
-    const rect = moveOption.getBoundingClientRect();
-    const openLeft = moveOption.closest('[data-cascade-direction]')?.dataset.cascadeDirection === 'left';
-    moveSubmenu.style.left = `${openLeft ? Math.max(8, rect.left - 212) : rect.right + 3}px`;
-    moveSubmenu.style.top = `${Math.max(8, Math.min(rect.top - 5, window.innerHeight - 295))}px`;
-  }
-  const option = event.target.closest('.relation-cascade-option');
-  const submenu = option?.nextElementSibling;
-  if (!submenu?.matches('.relation-level-two, .relation-level-three')) return;
-  const rect = option.getBoundingClientRect();
-  submenu.style.left = `${Math.max(8, rect.left - 184)}px`;
-  submenu.style.top = `${Math.max(8, Math.min(rect.top - 6, window.innerHeight - 270))}px`;
-});
-
 let searchTimer = null;
 elements.search.addEventListener('input', event => {
   state.query = event.target.value;
+  renderActiveFilterChips();
   clearTimeout(searchTimer);
   searchTimer = setTimeout(runSearch, 250);
 });
@@ -2890,11 +3258,12 @@ elements.structureButton.addEventListener('click', () => {
     state.restructureSelecting = true;
     state.selectedStructureFolders.clear();
     renderNavigation();
+    document.querySelector('.organize-menu')?.removeAttribute('open');
     showToast('请在左侧勾选需要重构的文件夹');
   }
 });
-elements.structureCancelButton.addEventListener('click', cancelRestructureSelection);
-elements.rollbackButton.addEventListener('click', () => toggleRollbackPanel());
+elements.structureCancelButton.addEventListener('click', () => { cancelRestructureSelection(); document.querySelector('.organize-menu')?.removeAttribute('open'); });
+elements.rollbackButton.addEventListener('click', () => { document.querySelector('.organize-menu')?.removeAttribute('open'); toggleRollbackPanel(); });
 document.querySelector('#rollbackClose').addEventListener('click', () => toggleRollbackPanel(false));
 elements.tree.addEventListener('keydown', event => { if (event.key === 'Enter' && event.target.matches('[data-folder-name]')) createFolder(); });
 elements.list.addEventListener('keydown', event => {
@@ -2917,14 +3286,16 @@ elements.graphButton.addEventListener('click', () => {
     setGraphMode(false);
     render();
     pushNavigation();
-  } else openGraphHome();
+  } else openGraphHome({ preserveFilters: true });
 });
 document.querySelectorAll('[data-graph-action]').forEach(button => button.addEventListener('click', () => {
   if (button.dataset.graphAction === 'zoom-in') zoomGraph(1.2);
   else if (button.dataset.graphAction === 'zoom-out') zoomGraph(1 / 1.2);
+  else if (button.dataset.graphAction === 'fit-focus') { clearTimeout(graphFitTimer); state.graphAutoFit = true; renderGraph(); }
   else resetGraphViewport();
 }));
 let graphClickTimer = null;
+let graphFitTimer = null;
 const graphClickDelay = 180;
 elements.graphCanvas.addEventListener('click', event => {
   event.stopPropagation();
@@ -2955,6 +3326,7 @@ elements.graphCanvas.addEventListener('dblclick', event => {
   event.preventDefault();
   event.stopPropagation();
   clearTimeout(graphClickTimer);
+  clearTimeout(graphFitTimer);
   if (item) openGraphItem(item.dataset.graphItem);
   else if (folder) openGraphFolder(folder.dataset.graphCategory);
   else openGraphFolder('');
